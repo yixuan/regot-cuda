@@ -1,10 +1,14 @@
 # RegOT-CUDA
 
-CUDA-Accelerated Regularized Optimal Transport library.
+CUDA-Accelerated Regularized Optimal Transport Library.
 
 ## Overview
 
 RegOT-CUDA is a CUDA-accelerated library for optimal transport computation, providing high-performance implementations of regularized optimal transport algorithms.
+
+## Work in Progress
+
+The RegOT-CUDA package is a work in progress. Currently we have implemented the block coordinate descent (BCD) algorithm for entropic-regularized optimal transport, which is equivalent to the well-known Sinkhorn algorithm in the logarithmic scale. More state-of-the-art solvers are under development, and a list of candidate algorithms can be found in the [RegOT-Python](https://github.com/yixuan/regot-python) package.
 
 ## Requirements
 
@@ -12,13 +16,13 @@ RegOT-CUDA is a CUDA-accelerated library for optimal transport computation, prov
 - NumPy >= 1.23.0
 - CUDA Toolkit >= 11.0
 - Compatible NVIDIA GPU
-- C++ compiler (C++11 or higher)
+- C++ compiler (C++11 or higher, for building from source)
 
 ## Installation
 
 ### Environment Setup
 
-It is recommended to use Conda to create a virtual environment and install necessary packages:
+It is recommended to use Conda to create a virtual environment and install necessary packages (using Linux as an example):
 
 ```bash
 # Create CUDA development environment
@@ -34,7 +38,7 @@ To compile RegOT-CUDA, you need to set the `CUDA_HOME` environment variable, for
 export CUDA_HOME=/usr/local/cuda
 ```
 
-If you used the Conda installation method above, you can run the following command to set the environment variable for the virtual environment:
+If you use the Conda installation method above, you can run the following command to set the environment variable for the virtual environment:
 
 ```bash
 conda activate nvdev
