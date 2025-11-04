@@ -77,3 +77,11 @@ reg = 0.1                 # Regularization parameter
 result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=1)
 plan = result["plan"]
 ```
+
+## Tests
+
+```bash
+cd regot-cuda/test
+pip install regot
+python test_sinkhorn_bcd.py
+```
