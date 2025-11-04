@@ -13,30 +13,72 @@ __global__ void optimal_beta_kernel(
     int n, int m
 )
 {
-    // Each thread handles one column
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    // Each block handles one column, with fixed block size (e.g., 256)
+    int j = blockIdx.x;
 
     if (j < m)
     {
-        // Find the maximum element in column j
-        // Used in log-sum-exp computation for numerical stability
-        double max_val = -INFINITY;
-        for (int i = 0; i < n; i++)
+        extern __shared__ double shared_data[];
+        int tid = threadIdx.x;
+        int block_size = blockDim.x;
+
+        // First pass: find maximum in column j
+        double local_max = -INFINITY;
+
+        // Each thread processes multiple elements of the column
+        for (int i = tid; i < n; i += block_size)
         {
             double D_ij = (alpha[i] - M[i * m + j]) / reg;
-            max_val = max(max_val, D_ij);
+            local_max = max(local_max, D_ij);
         }
 
-        // Compute log-sum-exp of (alpha_i - M_ij) / reg
-        double sum_exp = 0.0;
-        for (int i = 0; i < n; i++)
+        // Find global maximum across all threads in the block
+        shared_data[tid] = local_max;
+        __syncthreads();
+
+        for (int s = block_size / 2; s > 0; s >>= 1)
+        {
+            if (tid < s)
+            {
+                shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+            }
+            __syncthreads();
+        }
+
+        double global_max = shared_data[0];
+        __syncthreads();
+
+        // Second pass: compute sum of exp(D_ij - global_max)
+        double local_sum = 0.0;
+
+        // Each thread processes multiple elements again
+        for (int i = tid; i < n; i += block_size)
         {
             double D_ij = (alpha[i] - M[i * m + j]) / reg;
-            sum_exp += exp(D_ij - max_val);
+            local_sum += exp(D_ij - global_max);
         }
 
-        double log_sum = max_val + log(sum_exp);
-        beta[j] = reg * (logb[j] - log_sum);
+        // Reduce sum across all threads in the block
+        shared_data[tid] = local_sum;
+        __syncthreads();
+
+        for (int s = block_size / 2; s > 0; s >>= 1)
+        {
+            if (tid < s)
+            {
+                shared_data[tid] += shared_data[tid + s];
+            }
+            __syncthreads();
+        }
+
+        double global_sum = shared_data[0];
+
+        // First thread writes the result
+        if (tid == 0)
+        {
+            double log_sum = global_max + log(global_sum);
+            beta[j] = reg * (logb[j] - log_sum);
+        }
     }
 }
 
@@ -50,31 +92,72 @@ __global__ void optimal_alpha_kernel(
     int n, int m
 )
 {
-    // Each thread handles one row
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    // Each block handles one row, with fixed block size (e.g., 256)
+    int i = blockIdx.x;  // Each block handles one row
 
     if (i < n)
     {
-        // Find the maximum element in row i
-        // Used in log-sum-exp computation for numerical stability
-        double max_val = -INFINITY;
-        const double* M_i = M + i * m;
-        for (int j = 0; j < m; j++)
+        extern __shared__ double shared_data[];
+        int tid = threadIdx.x;
+        int block_size = blockDim.x;
+
+        // First pass: find maximum in row i
+        double local_max = -INFINITY;
+
+        // Each thread processes multiple elements of the row
+        for (int j = tid; j < m; j += block_size)
         {
-            double D_ij = (beta[j] - M_i[j]) / reg;
-            max_val = max(max_val, D_ij);
+            double D_ij = (beta[j] - M[i * m + j]) / reg;
+            local_max = max(local_max, D_ij);
         }
 
-        // Compute log-sum-exp of (alpha_i - M_ij) / reg
-        double sum_exp = 0.0;
-        for (int j = 0; j < m; j++)
+        // Find global maximum across all threads in the block
+        shared_data[tid] = local_max;
+        __syncthreads();
+
+        for (int s = block_size / 2; s > 0; s >>= 1)
         {
-            double D_ij = (beta[j] - M_i[j]) / reg;
-            sum_exp += exp(D_ij - max_val);
+            if (tid < s)
+            {
+                shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+            }
+            __syncthreads();
         }
 
-        double log_sum = max_val + log(sum_exp);
+        double global_max = shared_data[0];
+        __syncthreads();
+
+        // Second pass: compute sum of exp(D_ij - global_max)
+        double local_sum = 0.0;
+
+        // Each thread processes multiple elements again
+        for (int j = tid; j < m; j += block_size)
+        {
+            double D_ij = (beta[j] - M[i * m + j]) / reg;
+            local_sum += exp(D_ij - global_max);
+        }
+
+        // Reduce sum across all threads in the block
+        shared_data[tid] = local_sum;
+        __syncthreads();
+
+        for (int s = block_size / 2; s > 0; s >>= 1)
+        {
+            if (tid < s)
+            {
+                shared_data[tid] += shared_data[tid + s];
+            }
+            __syncthreads();
+        }
+
+        double global_sum = shared_data[0];
+
+        // First thread writes the result
+        if (tid == 0)
+        {
+            double log_sum = global_max + log(global_sum);
         alpha[i] = reg * (loga[i] - log_sum);
+        }
     }
 }
 
@@ -277,8 +360,15 @@ extern "C" __attribute__((visibility("default"))) void cuda_sinkhorn_bcd(
 
     // Configure kernel launch parameters
     dim3 threadsPerBlock(256);
-    dim3 numBlocks_alpha((n + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    dim3 numBlocks_beta((m + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    // Now each block handles one row/column, so we need n blocks for alpha and m blocks for beta
+    // One block per row
+    dim3 numBlocks_alpha(n);
+    // One block per column
+    dim3 numBlocks_beta(m);
+
+    // Calculate shared memory size for each kernel (for reduction operations)
+    size_t sharedMemory_alpha = threadsPerBlock.x * sizeof(double);  // For reduction in optimal_alpha_kernel
+    size_t sharedMemory_beta = threadsPerBlock.x * sizeof(double);   // For reduction in optimal_beta_kernel
 
     // BCD iterations with convergence checking
     // First use iterates difference error, and then switch to marginal error
@@ -290,13 +380,13 @@ extern "C" __attribute__((visibility("default"))) void cuda_sinkhorn_bcd(
         cudaMemcpy(d_beta_prev, d_beta, m * sizeof(double), cudaMemcpyDeviceToDevice);
 
         // Optimal alpha given beta
-        optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock>>>(
+        optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock, sharedMemory_alpha>>>(
             d_M, d_beta, d_loga, d_alpha, reg, n, m
         );
         cudaDeviceSynchronize();
 
         // Optimal beta given alpha
-        optimal_beta_kernel<<<numBlocks_beta, threadsPerBlock>>>(
+        optimal_beta_kernel<<<numBlocks_beta, threadsPerBlock, sharedMemory_beta>>>(
             d_M, d_alpha, d_logb, d_beta, reg, n, m
         );
         cudaDeviceSynchronize();
