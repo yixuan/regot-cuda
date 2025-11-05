@@ -10,6 +10,17 @@ extern "C" void cuda_sinkhorn_bcd(
     const double* x0, double* dual
 );
 
+extern "C" void T_computation(
+    int nrun,
+    const double* alpha,
+    const double* beta,
+    const double* M,
+    double reg,
+    int n, int m, int K,
+    double* Trowsums, double* Tcolsums, double* Tsum,
+    double* Tvalues, int* indices
+);
+
 namespace py = pybind11;
 
 // Python interface for sinkhorn_bcd function
@@ -107,6 +118,78 @@ py::dict sinkhorn_bcd(
     return result;
 }
 
+// Python interface for T_computation function
+py::dict test_T_computation(
+    py::array_t<double> alpha,
+    py::array_t<double> beta,
+    py::array_t<double> M,
+    double reg,
+    int K,
+    int nrun
+)
+{
+    // Get input array info
+    py::buffer_info alpha_buf = alpha.request();
+    py::buffer_info beta_buf = beta.request();
+    py::buffer_info M_buf = M.request();
+
+    if (alpha_buf.ndim != 1 || beta_buf.ndim != 1)
+    {
+        throw std::runtime_error("alpha and beta must be 1D arrays");
+    }
+    if (M_buf.ndim != 2)
+    {
+        throw std::runtime_error("M must be a 2D array");
+    }
+
+    int n = alpha_buf.shape[0];
+    int m = beta_buf.shape[0];
+
+    if (M_buf.shape[0] != n || M_buf.shape[1] != m)
+    {
+        throw std::runtime_error("Shape mismatch: M should be [n x m] where n=len(alpha) and m=len(beta)");
+    }
+
+    // Get raw pointers
+    const double* alpha_ptr = static_cast<const double*>(alpha_buf.ptr);
+    const double* beta_ptr = static_cast<const double*>(beta_buf.ptr);
+    const double* M_ptr = static_cast<const double*>(M_buf.ptr);
+
+    // Create output arrays
+    py::array_t<double> Trowsums = py::array_t<double>(n);
+    py::array_t<double> Tcolsums = py::array_t<double>(m);
+    py::array_t<double> Tvalues = py::array_t<double>({n, m});
+    py::array_t<int> indices = py::array_t<int>({n, m});
+
+    py::buffer_info Trowsums_buf = Trowsums.request();
+    py::buffer_info Tcolsums_buf = Tcolsums.request();
+    py::buffer_info Tvalues_buf = Tvalues.request();
+    py::buffer_info indices_buf = indices.request();
+
+    double* Trowsums_ptr = static_cast<double*>(Trowsums_buf.ptr);
+    double* Tcolsums_ptr = static_cast<double*>(Tcolsums_buf.ptr);
+    double* Tvalues_ptr = static_cast<double*>(Tvalues_buf.ptr);
+    int* indices_ptr = static_cast<int*>(indices_buf.ptr);
+
+    // Call optimized CUDA function
+    double Tsum;
+    T_computation(
+        nrun,
+        alpha_ptr, beta_ptr, M_ptr, reg, n, m, K,
+        Trowsums_ptr, Tcolsums_ptr, &Tsum, Tvalues_ptr, indices_ptr
+    );
+
+    // Create result dictionary
+    py::dict result;
+    result["Trowsums"] = Trowsums;
+    result["Tcolsums"] = Tcolsums;
+    result["Tsum"] = Tsum;
+    result["Tvalues"] = Tvalues;
+    result["indices"] = indices;
+
+    return result;
+}
+
 // PYBIND11 module definition
 PYBIND11_MODULE(_internal, m)
 {
@@ -116,4 +199,9 @@ PYBIND11_MODULE(_internal, m)
           py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
           py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
           "Sinkhorn Block Coordinate Descent algorithm (CUDA implementation)");
+
+    m.def("test_T_computation", &test_T_computation,
+          py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("reg"), py::arg("K"),
+          py::arg("nrun") = 1,
+          "Test T computation (CUDA implementation)");
 }
