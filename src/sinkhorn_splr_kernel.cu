@@ -27,6 +27,70 @@
 #define BLOCK_DIM_Y 16
 #define BLOCK_DIM 256
 
+
+
+// Background: we want to solve the dual problem of regularized optimal transport
+//
+// The dual variables are x = (alpha, beta_t), where beta_t means beta[:-1],
+// and we always set beta = (beta_t, 0)
+// alpha [n], beta [m], beta_t [m-1]
+//
+// The objective function (f), gradient (g), and Hessian (H) have closed-form expressions
+// Let T[i, j] = exp((alpha[i] + beta[j] - M[i, j]) / reg), T_t = T[:, :-1]
+// f = reg * sum(T) - <alpha, a> - <beta, b>
+// g = (rowsum(T) - a, colsum(T_t) - b_t) = (Trowsums - a, Tcolsums_t - b_t)
+// H = [diag(Trowsums)  T_t             ] / reg
+//     [(T_t)'          diag(Tcolsums_t)]
+//
+// In the SPLR algorithm, we will sparsify T into a sparse matrix Tsp, so
+// Hsp = [diag(Trowsums)  Tsp_t           ] / reg
+//       [(Tsp_t)'        diag(Tcolsums_t)]
+// Then we need to compute the CSR representation of the Hsp matrix
+// For sparse Cholesky decomposition, we only need the lower triangular part, so
+// it suffices to find the scaled and lower-triangular sparse matrix
+// Hsl = [diag(Trowsums)  0               ]
+//       [(Tsp_t)'        diag(Tcolsums_t)]
+//
+// To get the CSR representation of Hsl, we need to know the values of the
+// nonzero elements and their locations in the matrix
+// One way to do this is flattening the matrix and obtain two pointers:
+//     Hvalues = [h0, h1, ..., hs],
+//     Hindices = [i0, i1, ..., is],
+// where Hindices contains the flattened indices of Hvalues, and we assume that
+// Hindices is in ascending order
+// Then the CSR representation of Hsl is
+//     val = [h0, h1, ..., hs],
+//     colind = [i0 % N, i1 % N, ..., is % N],
+//     rowptr = [0, p[1], p[2], ..., p[N]], p[1] = #{i / N == 0},
+//                                          p[2] - p[1] = #{i / N == 1},
+//                                          p[3] - p[2] = #{i / N == 2}, ...,
+// where N = n+m-1 is the size of Hsl
+//
+// Moreover, we know that Hvalues can be divided into three parts:
+// 1. Trowsums = r = [r0, r1, ..., r[n-1]]
+// 2. Tcolsums_t = c_t = [c0, c1, ..., c[m-2]]
+// 3. Values of (Tsp_t)', Tvalues = [t0, t1, ..., t[K-1]]
+// The corresponding indices are:
+// 1. r indices: [i * N + i] = [i * (N + 1)]], i = 0, ..., n-1
+// 2. c_t indices: [(n + j) * N + n + j] = [(n + j) * (N + 1)], j = 0, ..., m-2
+// 3. Indices of (Tsp_t)', with the mapping
+//        (i, j) in T -> (j, i) in T'/(T_t)' -> (n+j, i) in Hsl -> (n+j)*N+i for flattened indices
+
+// To finish this task, we construct three core functions that are mainly run on GPU
+// 1. A fused CUDA kernel that focuses on the computation on T:
+//    (a) Tsum, Trowsums, and Tcolsums
+//    (b) Flattened T' values and indices, which are used for downstream sparsification
+//        We need to exclude the last row of T' in the output T_out
+// 2. A function preparing the data for (Tsp_t)':
+//    (a) Find the top-K elements in the output T_out array and the corresponding indices
+//    (b) Put these K (Tvalues, Tindices)-pairs at the front of pointers
+//    (c) Put (r, r indices) and (c_t, c_t indices) after the (Tvalues, T indices)-pairs
+//    (d) Sort these (N+K) (val, ind)-pairs according to ind, so that the reordered val pointer
+//        is exactly the CSR value pointer of Hsl
+// 3. A function to compute the CSR pointers from flattened values and indices
+
+
+
 // Fused CUDA kernel for computation on T
 // 1. Compute T[i,j] = exp(...)
 // 2. Perform parallel reduction for row sums, column sums, and total sum using shared memory
