@@ -10,7 +10,7 @@ extern "C" void cuda_sinkhorn_bcd(
     const double* x0, double* dual
 );
 
-extern "C" void T_computation(
+extern "C" void T_computation_sparsify(
     int nrun,
     const double* alpha,
     const double* beta,
@@ -18,7 +18,8 @@ extern "C" void T_computation(
     double reg,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
-    double* Tvalues, int* indices
+    double* Tvalues, int* indices,
+    double* csr_val, int* csr_rowptr, int* csr_colind
 );
 
 namespace py = pybind11;
@@ -118,7 +119,7 @@ py::dict sinkhorn_bcd(
     return result;
 }
 
-// Python interface for T_computation function
+// Python interface for T_computation function with CSR output
 py::dict test_T_computation(
     py::array_t<double> alpha,
     py::array_t<double> beta,
@@ -150,33 +151,49 @@ py::dict test_T_computation(
         throw std::runtime_error("Shape mismatch: M should be [n x m] where n=len(alpha) and m=len(beta)");
     }
 
+    // Bound check for K
+    int Ks = std::max(K, 1);
+    Ks = std::min(Ks, n * m);
+
     // Get raw pointers
     const double* alpha_ptr = static_cast<const double*>(alpha_buf.ptr);
     const double* beta_ptr = static_cast<const double*>(beta_buf.ptr);
     const double* M_ptr = static_cast<const double*>(M_buf.ptr);
 
-    // Create output arrays
+    // Create output arrays for T computation
     py::array_t<double> Trowsums = py::array_t<double>(n);
     py::array_t<double> Tcolsums = py::array_t<double>(m);
     py::array_t<double> Tvalues = py::array_t<double>({n, m});
     py::array_t<int> indices = py::array_t<int>({n, m});
 
+    // Create CSR output arrays
+    py::array_t<double> val = py::array_t<double>(Ks);
+    py::array_t<int> rowptr = py::array_t<int>(n + 1);
+    py::array_t<int> colind = py::array_t<int>(Ks);
+
     py::buffer_info Trowsums_buf = Trowsums.request();
     py::buffer_info Tcolsums_buf = Tcolsums.request();
     py::buffer_info Tvalues_buf = Tvalues.request();
     py::buffer_info indices_buf = indices.request();
+    py::buffer_info val_buf = val.request();
+    py::buffer_info rowptr_buf = rowptr.request();
+    py::buffer_info colind_buf = colind.request();
 
     double* Trowsums_ptr = static_cast<double*>(Trowsums_buf.ptr);
     double* Tcolsums_ptr = static_cast<double*>(Tcolsums_buf.ptr);
     double* Tvalues_ptr = static_cast<double*>(Tvalues_buf.ptr);
     int* indices_ptr = static_cast<int*>(indices_buf.ptr);
+    double* val_ptr = static_cast<double*>(val_buf.ptr);
+    int* rowptr_ptr = static_cast<int*>(rowptr_buf.ptr);
+    int* colind_ptr = static_cast<int*>(colind_buf.ptr);
 
-    // Call optimized CUDA function
+    // Call optimized CUDA function with CSR conversion
     double Tsum;
-    T_computation(
+    T_computation_sparsify(
         nrun,
-        alpha_ptr, beta_ptr, M_ptr, reg, n, m, K,
-        Trowsums_ptr, Tcolsums_ptr, &Tsum, Tvalues_ptr, indices_ptr
+        alpha_ptr, beta_ptr, M_ptr, reg, n, m, Ks,
+        Trowsums_ptr, Tcolsums_ptr, &Tsum, Tvalues_ptr, indices_ptr,
+        val_ptr, rowptr_ptr, colind_ptr
     );
 
     // Create result dictionary
@@ -186,6 +203,12 @@ py::dict test_T_computation(
     result["Tsum"] = Tsum;
     result["Tvalues"] = Tvalues;
     result["indices"] = indices;
+
+    // Add CSR format results
+    result["csr_val"] = val;
+    result["csr_rowptr"] = rowptr;
+    result["csr_colind"] = colind;
+    result["K_actual"] = Ks;
 
     return result;
 }

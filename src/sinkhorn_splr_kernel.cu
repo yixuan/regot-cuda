@@ -1,11 +1,14 @@
 #include <iostream>
 #include <cmath>
 
-// CUDA Headers
+// CUDA headers
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-// Thrust Headers
+// CUB headers
+#include <cub/cub.cuh>
+
+// Thrust headers
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
 
@@ -22,6 +25,7 @@
 // Define block dimensions (16x16 = 256 threads)
 #define BLOCK_DIM_X 16
 #define BLOCK_DIM_Y 16
+#define BLOCK_DIM 256
 
 // Fused CUDA kernel for computation on T
 // 1. Compute T[i,j] = exp(...)
@@ -188,8 +192,81 @@ void launch_T_computation(
     );
 }
 
-// Host function, mainly to test launch_T_computation()
-extern "C" void T_computation(
+// Extract column indices and count the number of elements per row
+__global__ void extract_columns_and_count_kernel(
+    const int* __restrict__ d_indices,
+    int* __restrict__ d_colind,
+    int* __restrict__ d_row_counts,
+    int K, int m
+)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < K)
+    {
+        // Convert flattened index to row and column
+        int flat_idx = d_indices[idx];
+        int row = flat_idx / m;
+        int col = flat_idx % m;
+
+        // Set column index
+        d_colind[idx] = col;
+
+        // Increment row count atomically
+        atomicAdd(&d_row_counts[row], 1);
+    }
+}
+
+// Helper function to convert sorted indices to CSR format
+//
+// Input: d_indices [K]
+// Output: d_colind [K]
+// Output: d_rowptr [n + 1]
+// Working space: d_row_counts [n]
+void launch_csr_conversion(
+    const int* d_indices,
+    int* d_colind,
+    int* d_rowptr,
+    int* d_row_counts,
+    int K, int n, int m
+)
+{
+    // Initialize d_row_counts to zero vector
+    CUDA_CHECK(cudaMemset(d_row_counts, 0, n * sizeof(int)));
+
+    // Extract column indices and count the number of elements per row
+    int threadsPerBlock = BLOCK_DIM;
+    int blocksPerGrid = (K + threadsPerBlock - 1) / threadsPerBlock;
+
+    extract_columns_and_count_kernel<<<blocksPerGrid, threadsPerBlock>>>(
+        d_indices, d_colind, d_row_counts, K, m
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+
+    // Compute row pointers using inclusive sum
+    // [a, b, c] -> [a, a + b, a + b + c]
+
+    // The first element of row pointer is always zero
+    CUDA_CHECK(cudaMemset(d_rowptr, 0, sizeof(int)));
+    // Get memory size for InclusiveSum
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    CUDA_CHECK(cub::DeviceScan::InclusiveSum(
+        d_temp_storage, temp_storage_bytes, d_row_counts, d_rowptr + 1, n
+    ));
+    // Allocate memory
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    // Run InclusiveSum
+    CUDA_CHECK(cub::DeviceScan::InclusiveSum(
+        d_temp_storage, temp_storage_bytes, d_row_counts, d_rowptr + 1, n
+    ));
+    // Free memory
+    CUDA_CHECK(cudaFree(d_temp_storage));
+}
+
+// Host function, mainly to test T computation and CSR conversion
+extern "C" void T_computation_sparsify(
     int nrun,
     const double* alpha,
     const double* beta,
@@ -197,16 +274,22 @@ extern "C" void T_computation(
     double reg,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
-    double* Tvalues, int* indices
+    double* Tvalues, int* indices,
+    double* csr_val, int* csr_rowptr, int* csr_colind
 )
 {
     // Total number of elements
     size_t N_total = n * m;
 
+    // Bound check for K
+    size_t Ks = max(K, 1);
+    Ks = min(Ks, N_total);
+
     // Allocate device memory
     double *d_alpha, *d_beta, *d_M;
     double *d_Trowsums, *d_Tcolsums, *d_Tsum, *d_Tvalues;
     int *d_indices;
+    int *d_csr_rowptr, *d_csr_colind, *d_row_counts;
 
     CUDA_CHECK(cudaMalloc(&d_alpha, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_beta, m * sizeof(double)));
@@ -216,6 +299,9 @@ extern "C" void T_computation(
     CUDA_CHECK(cudaMalloc(&d_Tsum, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tvalues, N_total * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_indices, N_total * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_colind, Ks * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (n + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_row_counts, Ks * sizeof(int)));
 
     // Copy input data from host to device
     CUDA_CHECK(cudaMemcpy(d_alpha, alpha, n * sizeof(double), cudaMemcpyHostToDevice));
@@ -228,25 +314,35 @@ extern "C" void T_computation(
     {
         launch_T_computation(
             d_alpha, d_beta, d_M,
-            reg, n, m, K,
+            reg, n, m, Ks,
             d_Trowsums, d_Tcolsums, d_Tsum,
             d_Tvalues, d_indices
         );
         cudaDeviceSynchronize();
     }
 
-    // Step 5: Copy results back to host
+    // Convert top K elements to CSR format
+    launch_csr_conversion(
+        d_indices, d_csr_colind, d_csr_rowptr, d_row_counts, Ks, n, m
+    );
+
+    // Synchronize
+    // Ensure all ops (kernel + Thrust + CUB) are complete before returning
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copy results back to host
     CUDA_CHECK(cudaMemcpy(Trowsums, d_Trowsums, n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tcolsums, d_Tcolsums, m * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tsum, d_Tsum, sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tvalues, d_Tvalues, N_total * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(indices, d_indices, N_total * sizeof(int), cudaMemcpyDeviceToHost));
 
-    // Step 5: Synchronize
-    // Ensure all ops (kernel + Thrust) are complete before returning
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Copy CSR results
+    CUDA_CHECK(cudaMemcpy(csr_val, d_Tvalues, Ks * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(csr_colind, d_csr_colind, Ks * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(csr_rowptr, d_csr_rowptr, (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
 
-    // Step 6: Free device memory
+    // Free device memory
     CUDA_CHECK(cudaFree(d_alpha));
     CUDA_CHECK(cudaFree(d_beta));
     CUDA_CHECK(cudaFree(d_M));
@@ -255,4 +351,7 @@ extern "C" void T_computation(
     CUDA_CHECK(cudaFree(d_Tsum));
     CUDA_CHECK(cudaFree(d_Tvalues));
     CUDA_CHECK(cudaFree(d_indices));
+    CUDA_CHECK(cudaFree(d_csr_colind));
+    CUDA_CHECK(cudaFree(d_csr_rowptr));
+    CUDA_CHECK(cudaFree(d_row_counts));
 }
