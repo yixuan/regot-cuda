@@ -152,8 +152,19 @@ py::dict test_T_computation(
     }
 
     // Bound check for K
+    int Te = n * (m - 1);
     int Ks = std::max(K, 1);
-    Ks = std::min(Ks, n * m);
+    Ks = std::min(Ks, Te);
+
+    // Size of Hsl
+    size_t Hsize = n + m - 1;
+
+    // Number of nonzero elements in Hsl
+    size_t nnz = Ks + Hsize;
+
+    // Total number of elements for values and indices
+    // In the extreme case, T_t plus diagonal elements of Hsl
+    size_t N_total = Te + Hsize;
 
     // Get raw pointers
     const double* alpha_ptr = static_cast<const double*>(alpha_buf.ptr);
@@ -163,17 +174,17 @@ py::dict test_T_computation(
     // Create output arrays for T computation
     py::array_t<double> Trowsums = py::array_t<double>(n);
     py::array_t<double> Tcolsums = py::array_t<double>(m);
-    py::array_t<double> Tvalues = py::array_t<double>({n, m});
-    py::array_t<int> indices = py::array_t<int>({n, m});
+    py::array_t<double> values = py::array_t<double>(N_total);
+    py::array_t<int> indices = py::array_t<int>(N_total);
 
     // Create CSR output arrays
-    py::array_t<double> val = py::array_t<double>(Ks);
-    py::array_t<int> rowptr = py::array_t<int>(n + 1);
-    py::array_t<int> colind = py::array_t<int>(Ks);
+    py::array_t<double> val = py::array_t<double>(nnz);
+    py::array_t<int> rowptr = py::array_t<int>(Hsize + 1);
+    py::array_t<int> colind = py::array_t<int>(nnz);
 
     py::buffer_info Trowsums_buf = Trowsums.request();
     py::buffer_info Tcolsums_buf = Tcolsums.request();
-    py::buffer_info Tvalues_buf = Tvalues.request();
+    py::buffer_info values_buf = values.request();
     py::buffer_info indices_buf = indices.request();
     py::buffer_info val_buf = val.request();
     py::buffer_info rowptr_buf = rowptr.request();
@@ -181,18 +192,18 @@ py::dict test_T_computation(
 
     double* Trowsums_ptr = static_cast<double*>(Trowsums_buf.ptr);
     double* Tcolsums_ptr = static_cast<double*>(Tcolsums_buf.ptr);
-    double* Tvalues_ptr = static_cast<double*>(Tvalues_buf.ptr);
+    double* values_ptr = static_cast<double*>(values_buf.ptr);
     int* indices_ptr = static_cast<int*>(indices_buf.ptr);
     double* val_ptr = static_cast<double*>(val_buf.ptr);
     int* rowptr_ptr = static_cast<int*>(rowptr_buf.ptr);
     int* colind_ptr = static_cast<int*>(colind_buf.ptr);
 
-    // Call optimized CUDA function with CSR conversion
+    // Call CUDA function
     double Tsum;
     T_computation_sparsify(
         nrun,
         alpha_ptr, beta_ptr, M_ptr, reg, n, m, Ks,
-        Trowsums_ptr, Tcolsums_ptr, &Tsum, Tvalues_ptr, indices_ptr,
+        Trowsums_ptr, Tcolsums_ptr, &Tsum, values_ptr, indices_ptr,
         val_ptr, rowptr_ptr, colind_ptr
     );
 
@@ -201,7 +212,7 @@ py::dict test_T_computation(
     result["Trowsums"] = Trowsums;
     result["Tcolsums"] = Tcolsums;
     result["Tsum"] = Tsum;
-    result["Tvalues"] = Tvalues;
+    result["values"] = values;
     result["indices"] = indices;
 
     // Add CSR format results

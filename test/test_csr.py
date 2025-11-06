@@ -6,6 +6,8 @@ Test script for CSR conversion functionality
 import numpy as np
 from scipy.sparse import csr_matrix
 
+np.set_printoptions(linewidth=100)
+
 def test_csr_conversion():
     """Test the CSR conversion functionality"""
     try:
@@ -16,7 +18,7 @@ def test_csr_conversion():
         return
 
     # Simple test case
-    n, m, K = 8, 4, 10
+    n, m, K = 6, 3, 10
     reg = 0.1
 
     # Create test data
@@ -46,16 +48,19 @@ def test_csr_conversion():
 
     # Exclude last column
     T[:, -1] = 0
-    topk = np.argpartition(T.flatten(), K)[-K:]
+    topk = np.argpartition(-T.flatten(), K)[:K]
     Tsp = np.zeros(n * m)
     Tsp[topk] = T.flatten()[topk]
-    Tsp_d = Tsp.reshape(n, m)
-    Tsp = csr_matrix(Tsp_d.reshape(n, m))
-    print("T sparsified:")
-    print(Tsp_d)
-    print(f"Data: {Tsp.data}")
-    print(f"Col index: {Tsp.indices}")
-    print(f"Row pointer: {Tsp.indptr}")
+    Tsp = Tsp.reshape(n, m)
+    Hsl = np.diag(np.concat((Trowsums, Tcolsums[:-1])))
+    Hsl[n:, :n] = Tsp[:, :-1].transpose()
+    Hsl_d = Hsl
+    Hsl = csr_matrix(Hsl_d)
+    print("Hsl sparsified:")
+    print(Hsl_d)
+    print(f"Data: {Hsl.data}")
+    print(f"Col index: {Hsl.indices}")
+    print(f"Row pointer: {Hsl.indptr}")
 
     try:
         # Call the function
@@ -94,19 +99,19 @@ def test_csr_conversion():
         else:
             print(f"✗ Tcolsums does not match, difference = {Tcolsums_diff}")
 
-        val_diff = np.linalg.norm(Tsp.data - csr_val)
+        val_diff = np.linalg.norm(Hsl.data - csr_val)
         if val_diff < 1e-8:
             print(f"✓ CSR data matches, difference = {val_diff}")
         else:
             print(f"✗ CSR data does not match, difference = {val_diff}")
 
-        colind_diff = np.linalg.norm(Tsp.indices - csr_colind)
+        colind_diff = np.linalg.norm(Hsl.indices - csr_colind)
         if colind_diff < 1e-8:
             print(f"✓ CSR col index matches, difference = {colind_diff}")
         else:
             print(f"✗ CSR col index does not match, difference = {colind_diff}")
 
-        rowptr_diff = np.linalg.norm(Tsp.indptr - csr_rowptr)
+        rowptr_diff = np.linalg.norm(Hsl.indptr - csr_rowptr)
         if rowptr_diff < 1e-8:
             print(f"✓ CSR row pointer, difference = {rowptr_diff}")
         else:

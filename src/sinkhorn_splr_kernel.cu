@@ -92,15 +92,16 @@
 
 
 // Fused CUDA kernel for computation on T
-// 1. Compute T[i,j] = exp(...)
+// 1. Compute T[i, j] = exp(...)
 // 2. Perform parallel reduction for row sums, column sums, and total sum using shared memory
-// 3. Write modified T (last column = 0) to T_out
-// 4. Fill flat_indices (0...n*m-1) for the subsequent Top-K selection
-// @param T_out         [n*m]  Corresponds to Tvalues in the helper function
-// @param row_sums      [n]    Corresponds to Trowsums
-// @param col_sums      [m]    Corresponds to Tcolsums
-// @param total_sum     [1]    Corresponds to Tsum
-// @param flat_indices  [n*m]  Corresponds to indices
+// 3. Write (T_t)' (T' excluding the last row) to T_out
+// 4. Compute the flat indices in the Hsl matrix coordinates for the subsequent Top-K selection
+//
+// row_sums      [n]        Corresponds to Trowsums
+// col_sums      [m]        Corresponds to Tcolsums
+// total_sum     [1]        Corresponds to Tsum
+// T_out         [n*(m-1)]  Corresponds to values
+// flat_indices  [n*(m-1)]  Corresponds to indices
 __global__ void T_fused_kernel(
     const double* __restrict__ alpha, 
     const double* __restrict__ beta, 
@@ -130,7 +131,6 @@ __global__ void T_fused_kernel(
     int i = blockIdx.y * BLOCK_DIM_Y + ty;
     // Global column index
     int j = blockIdx.x * BLOCK_DIM_X + tx;
-    int flat_idx = i * m + j;
 
     // Initialize shared memory
     // Only one thread per row/column needs to do this
@@ -149,21 +149,36 @@ __global__ void T_fused_kernel(
     __syncthreads();
 
     // Boundary check and computation
-    if (i < n && j < m) {
-        // 1. Compute T[i, j]
-        double T_ij = exp((alpha[i] + beta[j] - M[flat_idx]) / reg);
+    if (i < n && j < m)
+    {
+        // Flattened index reading M[i, j]
+        int flat_idx_M = i * m + j;
+        // We read T_t by row, and write to T_out [n*(m-1)]
+        // T_t[i, j] -> T_out[i * (m-1) + j]
+        int flat_idx_T_out = flat_idx_M - i;  // == i * (m - 1) + j;
+        // Index of T_t[i, j] in flattened Hsl matrix
+        int flat_idx_Hsl = (n + j) * (n + m - 1) + i;
 
-        // 2. Fill flat index
-        flat_indices[flat_idx] = flat_idx;
+        // 1. Compute T[i, j]
+        double T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
+
+        // 2. Fill flat index only when j < m-1
+        if (j < m - 1)
+        {
+            flat_indices[flat_idx_T_out] = flat_idx_Hsl;
+        }
 
         // 3. Accumulate to shared memory (should be fast)
         atomicAdd(&s_row[ty], T_ij);
         atomicAdd(&s_col[tx], T_ij);
         atomicAdd(&s_block_sum, T_ij);
 
-        // 4. Write to T_out and modify the last column
-        //    (The sums include the original value of the last column)
-        T_out[flat_idx] = (j == m - 1) ? 0.0 : T_ij;
+        // 4. Write to T_out and exclude the last row of T' (last column of T)
+        //    (The sums include all the original elements)
+        if (j < m - 1)
+        {
+            T_out[flat_idx_T_out] = T_ij;
+        }
     }
 
     // Synchronize to ensure all shared memory writes are complete
@@ -188,14 +203,60 @@ __global__ void T_fused_kernel(
     }
 }
 
+// CUDA kernel to write diagonal elements of Hsl to flattened value and index pointers
+//
+// Trowsums [n]
+// Tcolsums [m]
+// values   [n+m-1]
+// indices  [n+m-1]
+__global__ void write_diagonal_kernel(
+    const double* __restrict__ Trowsums, 
+    const double* __restrict__ Tcolsums,
+    int n, 
+    int m,
+    double* __restrict__ values,
+    int* __restrict__ indices
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+
+    // Write Trowsums[0...(n-1)] to values[0...(n-1)]
+    // Write i * (N + 1), i=0, ..., n-1 to indices[0...(n-1)]
+    //
+    // Write Tcolsums[0...(m-2)] to (values+n)[0...(m-2)]
+    // Write (n + j) * (N + 1), j=0, ..., m-2 to (indices+n)[0...(m-2)]
+    int Hsize = n + m - 1;
+    if (idx < Hsize)
+    {
+        values[idx] = (idx < n) ? (Trowsums[idx]) : (Tcolsums[idx - n]);
+        indices[idx] = idx * (Hsize + 1);
+    }
+}
+
 // Helper function to launch CUDA kernel on device
 //
 // Given alpha, beta, M (all on device), and reg:
 // 1. Compute T matrix
 // 2. Compute row/column/total sums of T
-// 3. The largest K elements of T are stored in the first K elements in d_Tvalues
+// 3. The largest K elements of (T_t)' are stored in the first K elements in d_values
 // 4. The corresponding (flattened) indices are stored in d_indices
-// 5. The first K elements in d_indices are in ascending order
+// 5. Add diagonal elements of Hsl matrix to d_values and corresponding indices to d_indices
+//    (overwrite d_values[K:] and d_indices[K:])
+// 6. The first (K+N) elements in d_indices are in ascending order, N = Hsize = n+m-1
+//
+// Assume K+N = K+n+m-1 <= n*(m-1), or we can simply allocate n*(m-1)+n+m-1=(n+1)*m-1 elements
+// for d_values and d_indices
+//
+// In: d_alpha     [n]
+// In: d_beta      [m]
+// In: d_M         [n*m]
+// Out: d_Trowsums [n]
+// Out: d_Tcolsums [m]
+// Out: d_Tsum     [1]
+// Out: d_values   [n*(m-1)]
+// Out: d_indices  [n*(m-1)]
 void launch_T_computation(
     const double* d_alpha,
     const double* d_beta,
@@ -203,11 +264,11 @@ void launch_T_computation(
     double reg,
     int n, int m, int K,
     double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
-    double* d_Tvalues, int* d_indices
+    double* d_values, int* d_indices
 )
 {
-    // Total number of elements
-    size_t N_total = n * m;
+    // Total number of T values
+    size_t N_total = n * (m - 1);
 
     // Bound check
     size_t Ks = max(K, 1);
@@ -226,9 +287,9 @@ void launch_T_computation(
 
     T_fused_kernel<<<gridDim, blockDim>>>(
         d_alpha, d_beta, d_M, reg, n, m,
-        d_Trowsums, d_Tcolsums, d_Tsum, d_Tvalues, d_indices
+        d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
     );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
 
     // Currently we do have a good Top-K implementation,
@@ -236,57 +297,73 @@ void launch_T_computation(
     // Step 3: Call thrust::sort_by_key to sort T values
 
     // Wrap raw device pointers with thrust::device_ptr
-    thrust::device_ptr<double> d_Tvalues_ptr = thrust::device_pointer_cast(d_Tvalues);
+    thrust::device_ptr<double> d_values_ptr = thrust::device_pointer_cast(d_values);
     thrust::device_ptr<int> d_indices_ptr = thrust::device_pointer_cast(d_indices);
 
     // Perform the in-place sorting according to T values (descending order)
     thrust::sort_by_key(
-        d_Tvalues_ptr,
-        d_Tvalues_ptr + N_total,
+        d_values_ptr,
+        d_values_ptr + N_total,
         d_indices_ptr,
         ::cuda::std::greater<double>()
     );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
 
-    // Step 4: Call thrust::sort_by_key on the first K elements to sort indices (ascending order)
+    // Step 4: Add diagonal elements of Hsl to (values, indices)
+    // We no longer need values[K:] and indices[K:], so we overwrite these addresses
+    int Hsize = n + m - 1;
+    dim3 threadsPerBlock(BLOCK_DIM);
+    dim3 numBlocks((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    write_diagonal_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_Trowsums, d_Tcolsums, n, m, d_values + Ks, d_indices + Ks
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+
+    // Step 5: Call thrust::sort_by_key on the first (K+Hsize) elements to sort indices (ascending order)
     thrust::sort_by_key(
         d_indices_ptr,
-        d_indices_ptr + Ks,
-        d_Tvalues_ptr
+        d_indices_ptr + (Ks + Hsize),
+        d_values_ptr
     );
 }
 
 // Extract column indices and count the number of elements per row
+//
+// In: indices [nnz]
+// Out: colind [nnz]
+// Out: row_counts [cols]
 __global__ void extract_columns_and_count_kernel(
-    const int* __restrict__ d_indices,
-    int* __restrict__ d_colind,
-    int* __restrict__ d_row_counts,
-    int K, int m
+    const int* __restrict__ indices,
+    int* __restrict__ colind,
+    int* __restrict__ row_counts,
+    int nnz, int cols
 )
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (idx < K)
+    if (idx < nnz)
     {
         // Convert flattened index to row and column
-        int flat_idx = d_indices[idx];
-        int row = flat_idx / m;
-        int col = flat_idx % m;
+        int flat_idx = indices[idx];
+        int row = flat_idx / cols;
+        int col = flat_idx % cols;
 
         // Set column index
-        d_colind[idx] = col;
+        colind[idx] = col;
 
         // Increment row count atomically
-        atomicAdd(&d_row_counts[row], 1);
+        atomicAdd(&row_counts[row], 1);
     }
 }
 
 // Helper function to convert sorted indices to CSR format
 //
-// Input: d_indices [K]
-// Output: d_colind [K]
-// Output: d_rowptr [n + 1]
-// Working space: d_row_counts [n]
+// Input: d_indices [nnz] = [K+Hsize] = [K+n+m-1]
+// Output: d_colind [nnz]
+// Output: d_rowptr [Hsize + 1] = [n+m]
+// Working space: d_row_counts [Hsize] = [n+m-1]
 void launch_csr_conversion(
     const int* d_indices,
     int* d_colind,
@@ -296,14 +373,16 @@ void launch_csr_conversion(
 )
 {
     // Initialize d_row_counts to zero vector
-    CUDA_CHECK(cudaMemset(d_row_counts, 0, n * sizeof(int)));
+    int Hsize = n + m - 1;
+    int nnz = K + Hsize;
+    CUDA_CHECK(cudaMemset(d_row_counts, 0, Hsize * sizeof(int)));
 
     // Extract column indices and count the number of elements per row
-    int threadsPerBlock = BLOCK_DIM;
-    int blocksPerGrid = (K + threadsPerBlock - 1) / threadsPerBlock;
+    dim3 threadsPerBlock(BLOCK_DIM);
+    dim3 numBlocks((nnz + threadsPerBlock.x - 1) / threadsPerBlock.x);
 
-    extract_columns_and_count_kernel<<<blocksPerGrid, threadsPerBlock>>>(
-        d_indices, d_colind, d_row_counts, K, m
+    extract_columns_and_count_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_indices, d_colind, d_row_counts, nnz, Hsize
     );
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
@@ -317,13 +396,13 @@ void launch_csr_conversion(
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
-        d_temp_storage, temp_storage_bytes, d_row_counts, d_rowptr + 1, n
+        d_temp_storage, temp_storage_bytes, d_row_counts, d_rowptr + 1, Hsize
     ));
     // Allocate memory
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
     // Run InclusiveSum
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
-        d_temp_storage, temp_storage_bytes, d_row_counts, d_rowptr + 1, n
+        d_temp_storage, temp_storage_bytes, d_row_counts, d_rowptr + 1, Hsize
     ));
     // Free memory
     CUDA_CHECK(cudaFree(d_temp_storage));
@@ -338,39 +417,48 @@ extern "C" void T_computation_sparsify(
     double reg,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
-    double* Tvalues, int* indices,
+    double* values, int* indices,
     double* csr_val, int* csr_rowptr, int* csr_colind
 )
 {
-    // Total number of elements
-    size_t N_total = n * m;
+    // Total number of elements of M and T_t
+    size_t Me = n * m, Te = n * (m - 1);
 
     // Bound check for K
     size_t Ks = max(K, 1);
-    Ks = min(Ks, N_total);
+    Ks = min(Ks, Te);
+
+    // Size of Hsl
+    size_t Hsize = n + m - 1;
+
+    // Number of nonzero elements in Hsl
+    size_t nnz = Ks + Hsize;
+
+    // Total number of elements for values and indices
+    // In the extreme case, T_t plus diagonal elements of Hsl
+    size_t N_total = Te + Hsize;
 
     // Allocate device memory
     double *d_alpha, *d_beta, *d_M;
-    double *d_Trowsums, *d_Tcolsums, *d_Tsum, *d_Tvalues;
-    int *d_indices;
-    int *d_csr_rowptr, *d_csr_colind, *d_row_counts;
+    double *d_Trowsums, *d_Tcolsums, *d_Tsum, *d_values;
+    int *d_indices, *d_csr_rowptr, *d_csr_colind, *d_row_counts;
 
     CUDA_CHECK(cudaMalloc(&d_alpha, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_beta, m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_M, N_total * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_M, Me * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Trowsums, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tcolsums, m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tsum, sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Tvalues, N_total * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_values, N_total * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_indices, N_total * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_csr_colind, Ks * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (n + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_row_counts, Ks * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_colind, nnz * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (Hsize + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_row_counts, nnz * sizeof(int)));
 
     // Copy input data from host to device
     CUDA_CHECK(cudaMemcpy(d_alpha, alpha, n * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_beta, beta, m * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_M, M, N_total * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_M, M, Me * sizeof(double), cudaMemcpyHostToDevice));
 
     // Launch computation
     // Multiple runs for benchmarking
@@ -380,12 +468,13 @@ extern "C" void T_computation_sparsify(
             d_alpha, d_beta, d_M,
             reg, n, m, Ks,
             d_Trowsums, d_Tcolsums, d_Tsum,
-            d_Tvalues, d_indices
+            d_values, d_indices
         );
-        cudaDeviceSynchronize();
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaGetLastError());
     }
 
-    // Convert top K elements to CSR format
+    // Convert flattened elements to CSR format
     launch_csr_conversion(
         d_indices, d_csr_colind, d_csr_rowptr, d_row_counts, Ks, n, m
     );
@@ -393,18 +482,19 @@ extern "C" void T_computation_sparsify(
     // Synchronize
     // Ensure all ops (kernel + Thrust + CUB) are complete before returning
     CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
 
     // Copy results back to host
     CUDA_CHECK(cudaMemcpy(Trowsums, d_Trowsums, n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tcolsums, d_Tcolsums, m * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tsum, d_Tsum, sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(Tvalues, d_Tvalues, N_total * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(values, d_values, N_total * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(indices, d_indices, N_total * sizeof(int), cudaMemcpyDeviceToHost));
 
     // Copy CSR results
-    CUDA_CHECK(cudaMemcpy(csr_val, d_Tvalues, Ks * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(csr_colind, d_csr_colind, Ks * sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(csr_rowptr, d_csr_rowptr, (n + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(csr_val, d_values, nnz * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(csr_colind, d_csr_colind, nnz * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(csr_rowptr, d_csr_rowptr, (Hsize + 1) * sizeof(int), cudaMemcpyDeviceToHost));
 
     // Free device memory
     CUDA_CHECK(cudaFree(d_alpha));
@@ -413,7 +503,7 @@ extern "C" void T_computation_sparsify(
     CUDA_CHECK(cudaFree(d_Trowsums));
     CUDA_CHECK(cudaFree(d_Tcolsums));
     CUDA_CHECK(cudaFree(d_Tsum));
-    CUDA_CHECK(cudaFree(d_Tvalues));
+    CUDA_CHECK(cudaFree(d_values));
     CUDA_CHECK(cudaFree(d_indices));
     CUDA_CHECK(cudaFree(d_csr_colind));
     CUDA_CHECK(cudaFree(d_csr_rowptr));
