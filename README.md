@@ -29,7 +29,7 @@ It is recommended to use Conda to create a virtual environment and install neces
 conda create -n nvdev
 conda activate nvdev
 conda install python=3.12 numpy scipy matplotlib notebook ipywidgets gxx_linux-64
-conda install -c nvidia cuda-toolkit
+conda install -c nvidia cuda-toolkit libcudss-dev
 ```
 
 To compile RegOT-CUDA, you need to set the `CUDA_HOME` environment variable, for example:

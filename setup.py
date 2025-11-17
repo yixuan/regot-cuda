@@ -73,7 +73,7 @@ class BuildExt(build_ext):
             # Ensure CUDA libraries are linked
             if not hasattr(ext, "libraries"):
                 ext.libraries = []
-            for lib in ["cudart", "cuda"]:
+            for lib in ["cudart", "cuda", "cudss"]:
                 if lib not in ext.libraries:
                     ext.libraries.append(lib)
 
@@ -86,6 +86,9 @@ class BuildExt(build_ext):
 
         # Build nvcc command
         nvcc_cmd = ["nvcc", "-c", "-O3", "--use_fast_math", "-Xcompiler", "-fPIC"]
+
+        # Add virtual environment include directory
+        nvcc_cmd.extend(["-I", os.path.join(sys.exec_prefix, "include")])
 
         # Add include directories
         if hasattr(ext, "include_dirs"):
@@ -113,12 +116,12 @@ ext_modules = [
         "curegot._internal",
         sorted(glob("src/*.cpp") + glob("src/*.cu")),
         include_dirs=[
-            f"{cuda_path}/include",
+            os.path.join(cuda_path, "include"),
         ],
         library_dirs=[
-            f"{cuda_path}/lib64",
+            os.path.join(cuda_path, "lib64"),
         ],
-        libraries=["cudart", "cuda"],
+        libraries=["cudart", "cuda", "cudss"],
         define_macros=[("VERSION_INFO", __version__)],
         extra_compile_args=["-O3"],
         language="c++",
