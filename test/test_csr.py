@@ -64,7 +64,7 @@ def test_csr_conversion():
 
     try:
         # Call the function
-        result = curegot.test_T_computation(alpha, beta, M, reg, K, nrun=1)
+        result = curegot.test_T_computation_sparsify(alpha, beta, M, reg, K, nrun=1)
 
         print(f"\n=== T Computation Results ===")
         print(f"Total sum: {result['Tsum']:.6f}")

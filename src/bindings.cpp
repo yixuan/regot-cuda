@@ -10,7 +10,7 @@ extern "C" void cuda_sinkhorn_bcd(
     const double* x0, double* dual
 );
 
-extern "C" void T_computation_sparsify(
+extern "C" void T_computation_sparsify_host(
     int nrun,
     const double* alpha,
     const double* beta,
@@ -119,8 +119,8 @@ py::dict sinkhorn_bcd(
     return result;
 }
 
-// Python interface for T_computation function with CSR output
-py::dict test_T_computation(
+// Python interface for T_computation_sparsify_host function
+py::dict test_T_computation_sparsify(
     py::array_t<double> alpha,
     py::array_t<double> beta,
     py::array_t<double> M,
@@ -200,7 +200,7 @@ py::dict test_T_computation(
 
     // Call CUDA function
     double Tsum;
-    T_computation_sparsify(
+    T_computation_sparsify_host(
         nrun,
         alpha_ptr, beta_ptr, M_ptr, reg, n, m, Ks,
         Trowsums_ptr, Tcolsums_ptr, &Tsum, values_ptr, indices_ptr,
@@ -234,8 +234,9 @@ PYBIND11_MODULE(_internal, m)
           py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
           "Sinkhorn Block Coordinate Descent algorithm (CUDA implementation)");
 
-    m.def("test_T_computation", &test_T_computation,
+    m.def("test_T_computation_sparsify", &test_T_computation_sparsify,
           py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("reg"), py::arg("K"),
           py::arg("nrun") = 1,
-          "Test T computation (CUDA implementation)");
+          "Test T computation and sparsification (CUDA implementation)");
+
 }

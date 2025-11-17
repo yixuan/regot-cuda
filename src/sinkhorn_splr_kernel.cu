@@ -409,7 +409,7 @@ void launch_csr_conversion(
 }
 
 // Host function, mainly to test T computation and CSR conversion
-extern "C" void T_computation_sparsify(
+extern "C" void T_computation_sparsify_host(
     int nrun,
     const double* alpha,
     const double* beta,
