@@ -280,7 +280,7 @@ void compute_log_vector(const double* x, double* log_x, int size)
 {
     for (int i = 0; i < size; i++)
     {
-        log_x[i] = log(x[i]);
+        log_x[i] = std::log(x[i]);
     }
 }
 
