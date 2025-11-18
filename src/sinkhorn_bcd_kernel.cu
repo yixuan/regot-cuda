@@ -225,8 +225,9 @@ __global__ void compute_squared_l2_kernel(
 {
     extern __shared__ double shared_data[];
 
+    // Indices
     int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
 
     // Load squared difference into shared memory
     double squared_diff = 0.0;

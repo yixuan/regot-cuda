@@ -110,11 +110,14 @@
 // 3. Write (T_t)' (T' excluding the last row) to T_out
 // 4. Compute the flat indices in the Hsl matrix coordinates for the subsequent Top-K selection
 //
-// row_sums      [n]        Corresponds to Trowsums
-// col_sums      [m]        Corresponds to Tcolsums
-// total_sum     [1]        Corresponds to Tsum
-// T_out         [n*(m-1)]  Corresponds to values
-// flat_indices  [n*(m-1)]  Corresponds to indices
+// In: alpha          [n]
+// In: beta           [m]
+// In: M              [n*m]
+// Out: row_sums      [n]        Corresponds to Trowsums
+// Out: col_sums      [m]        Corresponds to Tcolsums
+// Out: total_sum     [1]        Corresponds to Tsum
+// Out: T_out         [n*(m-1)]  Corresponds to values
+// Out: flat_indices  [n*(m-1)]  Corresponds to indices
 __global__ void T_fused_kernel(
     const double* __restrict__ alpha,
     const double* __restrict__ beta,
@@ -216,6 +219,118 @@ __global__ void T_fused_kernel(
     }
 }
 
+// CUDA kernel to compute objective function (f) and gradient (g)
+//
+// f = reg * sum(T) - <alpha, a> - <beta, b>
+// g = (Trowsums - a, Tcolsums_t - b_t)
+//
+// In: ab        [n+m]       ab = (a, b)
+// In: gamma     [n+m]       gamma = (alpha, beta)
+// In: Trowsums  [n]
+// In: Tcolsums  [m]
+// In: Tsum      [1]
+// Out: objfn    [1]
+// Out: grad     [n+m-1]
+__global__ void obj_grad_kernel(
+    const double* __restrict__ ab,
+    const double* __restrict__ gamma,
+    const double* __restrict__ Trowsums,
+    const double* __restrict__ Tcolsums,
+    const double* __restrict__ Tsum,
+    double reg,
+    int n,
+    int m,
+    double* __restrict__ objfn,
+    double* __restrict__ grad
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+    int total_len = n + m;
+
+    // Local variable to accumulate the dot product <gamma, ab> = <alpha, a> + <beta, b>
+    double local_dotprod = 0.0;
+
+    // Grid-stride loop instead of `if (idx < total_len)`
+    for (int i = idx; i < total_len; i += stride)
+    {
+        double val_ab = ab[i];
+        double val_gamma = gamma[i];
+
+        // Task 1: accumulate dot product
+        local_dotprod += val_ab * val_gamma;
+
+        // Task 2: calculate gradient
+        // Note that grad is only [n + m - 1]
+        if (i < n)
+        {
+            // First n elements: Trowsums - a
+            grad[i] = Trowsums[i] - val_ab;
+        } 
+        else if (i < n + m - 1)
+        {
+            // Next m-1 elements: Tcolsums_t - b_t
+            // Current i corresponds to index (i - n) in b
+            grad[i] = Tcolsums[i - n] - val_ab;
+        }
+        // Note that when i == n + m - 1 (i.e., the last element of b),
+        // we do not write to grad, but still compute <gamma, ab>
+    }
+
+    // Parallel reduction to calculate the dot product
+    // Use warp shuffle for intra-warp reduction
+    unsigned int mask = 0xffffffff;
+    for (int s = warpSize / 2; s > 0; s >>= 1)
+    {
+        local_dotprod += __shfl_down_sync(mask, local_dotprod, s);
+    }
+
+    // Use shared memory for intra-block reduction
+    // Assuming max blockDim.x is 1024 and warpSize is 32, max 32 slots are needed
+    static __shared__ double shared_sums[32];
+    int lane = tid % warpSize;
+    int warp_id = tid / warpSize;
+
+    if (lane == 0)
+    {
+        shared_sums[warp_id] = local_dotprod;
+    }
+    __syncthreads();
+
+    // Let the first warp aggregate results from all Warps
+    // Only warp 0 does this
+    if (warp_id == 0)
+    {
+        double block_sum = 0.0;
+        // Only read the actual number of existing warps
+        if (lane < (blockDim.x + warpSize - 1) / warpSize)
+        {
+            block_sum = shared_sums[lane];
+        }
+        
+        // Use warp shuffle reduction again
+        for (int s = warpSize / 2; s > 0; s >> 1) {
+            block_sum += __shfl_down_sync(mask, block_sum, s);
+        }
+
+        // Atomically accumulate block results to global objfn
+        if (lane == 0)
+        {
+            // Let objfn hold -<gamma, ab>
+            atomicAdd(objfn, -block_sum);
+        }
+    }
+
+    // Handle constant term reg * Tsum
+    // Only one thread needs to do this once
+    if (idx == 0)
+    {
+        atomicAdd(objfn, reg * (*Tsum));
+    }
+}
+
 // CUDA kernel to write diagonal elements of Hsl to flattened value and index pointers
 //
 // Trowsums [n]
@@ -271,8 +386,7 @@ __global__ void write_diagonal_kernel(
 // Out: d_values   [n*(m-1)]
 // Out: d_indices  [n*(m-1)]
 void launch_T_computation(
-    const double* d_alpha,
-    const double* d_beta,
+    const double* d_gamma,
     const double* d_M,
     double reg,
     int n, int m, int K,
@@ -280,6 +394,10 @@ void launch_T_computation(
     double* d_values, int* d_indices
 )
 {
+    // Pointer aliases
+    const double* d_alpha = d_gamma;
+    const double* d_beta = d_gamma + n;
+
     // Total number of T values
     size_t N_total = n * (m - 1);
 
@@ -487,6 +605,8 @@ void T_computation_sparsify_host(
     const double* alpha,
     const double* beta,
     const double* M,
+    const double* a,
+    const double* b,
     double reg,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
@@ -512,12 +632,11 @@ void T_computation_sparsify_host(
     size_t N_total = Te + Hsize;
 
     // Allocate device memory
-    double *d_alpha, *d_beta, *d_M;
+    double *d_gamma, *d_M;
     double *d_Trowsums, *d_Tcolsums, *d_Tsum, *d_values;
     int *d_indices, *d_csr_rowptr, *d_csr_colind, *d_row_counts;
 
-    CUDA_CHECK(cudaMalloc(&d_alpha, n * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_beta, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_gamma, (n + m) * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_M, Me * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Trowsums, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tcolsums, m * sizeof(double)));
@@ -527,6 +646,10 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMalloc(&d_csr_colind, nnz * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (Hsize + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_row_counts, nnz * sizeof(int)));
+
+    // Pointer aliases
+    double* d_alpha = d_gamma;
+    double* d_beta = d_gamma + n;
 
     // Copy input data from host to device
     CUDA_CHECK(cudaMemcpy(d_alpha, alpha, n * sizeof(double), cudaMemcpyHostToDevice));
@@ -538,7 +661,7 @@ void T_computation_sparsify_host(
     for (int i = 0; i < nrun; i++)
     {
         launch_T_computation(
-            d_alpha, d_beta, d_M,
+            d_gamma, d_M,
             reg, n, m, Ks,
             d_Trowsums, d_Tcolsums, d_Tsum,
             d_values, d_indices
@@ -570,8 +693,7 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMemcpy(csr_rowptr, d_csr_rowptr, (Hsize + 1) * sizeof(int), cudaMemcpyDeviceToHost));
 
     // Free device memory
-    CUDA_CHECK(cudaFree(d_alpha));
-    CUDA_CHECK(cudaFree(d_beta));
+    CUDA_CHECK(cudaFree(d_gamma));
     CUDA_CHECK(cudaFree(d_M));
     CUDA_CHECK(cudaFree(d_Trowsums));
     CUDA_CHECK(cudaFree(d_Tcolsums));
