@@ -37,13 +37,11 @@ void cuda_sinkhorn_splr(
 )
 {
     // Allocate device memory
-    double *d_M, *d_a, *d_b, *d_loga, *d_logb, *d_P;
+    double *d_M, *d_ab, *d_loga, *d_P;
     double *d_gamma, *d_gamma_prev, *d_direc;
     cudaMalloc(&d_M, n * m * sizeof(double));
-    cudaMalloc(&d_a, n * sizeof(double));
-    cudaMalloc(&d_b, m * sizeof(double));
+    cudaMalloc(&d_ab, (n + m) * sizeof(double));
     cudaMalloc(&d_loga, n * sizeof(double));
-    cudaMalloc(&d_logb, m * sizeof(double));
     cudaMalloc(&d_P, n * m * sizeof(double));
     cudaMalloc(&d_gamma, (n + m) * sizeof(double));
     cudaMalloc(&d_gamma_prev, (n + m) * sizeof(double));
@@ -55,18 +53,14 @@ void cuda_sinkhorn_splr(
 
     // Copy input to device
     cudaMemcpy(d_M, M, n * m * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a, a, n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b, m * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ab, a, n * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ab + n, b, m * sizeof(double), cudaMemcpyHostToDevice);
 
     // Compute log vectors on host and copy to device
     double* loga = new double[n];
-    double* logb = new double[m];
     compute_log_vector(a, loga, n);
-    compute_log_vector(b, logb, m);
     cudaMemcpy(d_loga, loga, n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_logb, logb, m * sizeof(double), cudaMemcpyHostToDevice);
     delete[] loga;
-    delete[] logb;
 
     // Initialize alpha and beta
     if (x0 != nullptr)
@@ -135,10 +129,8 @@ void cuda_sinkhorn_splr(
 
     // Free device memory
     cudaFree(d_M);
-    cudaFree(d_a);
-    cudaFree(d_b);
+    cudaFree(d_ab);
     cudaFree(d_loga);
-    cudaFree(d_logb);
     cudaFree(d_P);
     cudaFree(d_gamma);
     cudaFree(d_gamma_prev);
