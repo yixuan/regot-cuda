@@ -308,7 +308,7 @@ double compute_l2_norm_cuda(double* d_vec1, double* d_vec2, int size)
 }
 
 // CUDA implementation of BCD algorithm for entropic-regularized OT
-extern "C" __attribute__((visibility("default"))) void cuda_sinkhorn_bcd(
+void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
     const double* x0 = nullptr, double* dual = nullptr

@@ -4,13 +4,13 @@
 #include <iostream>
 
 // CUDA function declaration
-extern "C" void cuda_sinkhorn_bcd(
+void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
     const double* x0, double* dual
 );
 
-extern "C" void T_computation_sparsify_host(
+void T_computation_sparsify_host(
     int nrun,
     const double* alpha,
     const double* beta,
@@ -22,7 +22,7 @@ extern "C" void T_computation_sparsify_host(
     double* csr_val, int* csr_rowptr, int* csr_colind
 );
 
-extern "C" void sparse_cholesky_solve_host(
+void sparse_cholesky_solve_host(
     const double* values,
     const int* colind,
     const int* rowptr,

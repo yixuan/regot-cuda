@@ -482,7 +482,7 @@ void sparse_cholesky_solve(
 }
 
 // Host function, mainly to test T computation and CSR conversion
-extern "C" void T_computation_sparsify_host(
+void T_computation_sparsify_host(
     int nrun,
     const double* alpha,
     const double* beta,
@@ -584,7 +584,7 @@ extern "C" void T_computation_sparsify_host(
 }
 
 // Host function, mainly to test sparse Cholesky solver
-extern "C" void sparse_cholesky_solve_host(
+void sparse_cholesky_solve_host(
     const double* values,
     const int* colind,
     const int* rowptr,
