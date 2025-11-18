@@ -27,7 +27,8 @@ void T_computation_sparsify_host(
     double reg,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
-    double* Tvalues, int* indices,
+    double* objfn, double* grad,
+    double* values, int* indices,
     double* csr_val, int* csr_rowptr, int* csr_colind
 );
 
@@ -298,6 +299,7 @@ py::dict test_T_computation_sparsify(
     // Create output arrays for T computation
     py::array_t<double> Trowsums = py::array_t<double>(n);
     py::array_t<double> Tcolsums = py::array_t<double>(m);
+    py::array_t<double> grad = py::array_t<double>(n + m - 1);
     py::array_t<double> values = py::array_t<double>(N_total);
     py::array_t<int> indices = py::array_t<int>(N_total);
 
@@ -308,6 +310,7 @@ py::dict test_T_computation_sparsify(
 
     py::buffer_info Trowsums_buf = Trowsums.request();
     py::buffer_info Tcolsums_buf = Tcolsums.request();
+    py::buffer_info grad_buf = grad.request();
     py::buffer_info values_buf = values.request();
     py::buffer_info indices_buf = indices.request();
     py::buffer_info val_buf = val.request();
@@ -316,6 +319,7 @@ py::dict test_T_computation_sparsify(
 
     double* Trowsums_ptr = static_cast<double*>(Trowsums_buf.ptr);
     double* Tcolsums_ptr = static_cast<double*>(Tcolsums_buf.ptr);
+    double* grad_ptr = static_cast<double*>(grad_buf.ptr);
     double* values_ptr = static_cast<double*>(values_buf.ptr);
     int* indices_ptr = static_cast<int*>(indices_buf.ptr);
     double* val_ptr = static_cast<double*>(val_buf.ptr);
@@ -323,11 +327,11 @@ py::dict test_T_computation_sparsify(
     int* colind_ptr = static_cast<int*>(colind_buf.ptr);
 
     // Call CUDA function
-    double Tsum;
+    double Tsum, objfn;
     T_computation_sparsify_host(
         nrun,
         alpha_ptr, beta_ptr, M_ptr, a_ptr, b_ptr, reg, n, m, Ks,
-        Trowsums_ptr, Tcolsums_ptr, &Tsum, values_ptr, indices_ptr,
+        Trowsums_ptr, Tcolsums_ptr, &Tsum, &objfn, grad_ptr, values_ptr, indices_ptr,
         val_ptr, rowptr_ptr, colind_ptr
     );
 
@@ -336,6 +340,8 @@ py::dict test_T_computation_sparsify(
     result["Trowsums"] = Trowsums;
     result["Tcolsums"] = Tcolsums;
     result["Tsum"] = Tsum;
+    result["objfn"] = objfn;
+    result["grad"] = grad;
     result["values"] = values;
     result["indices"] = indices;
 

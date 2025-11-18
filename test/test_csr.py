@@ -49,6 +49,11 @@ def test_csr_conversion():
     print(f"T row sums: {Trowsums}")
     print(f"T column sums: {Tcolsums}")
     print()
+    objfn = reg * Tsum - alpha.dot(a) - beta.dot(b)
+    grad = np.concatenate((Trowsums - a, Tcolsums[:-1] - b[:-1]))
+    print(f"objfn = {objfn:.6f}")
+    print(f"grad = {grad}")
+    print()
 
     # Exclude last column
     T[:, -1] = 0
@@ -76,6 +81,9 @@ def test_csr_conversion():
         print(f"Column sums: {result['Tcolsums']}")
         print()
 
+        print(f"Objfn: {result['objfn']:.6f}")
+        print(f"Grad: {result['grad']}")
+
         csr_val = result["csr_val"]
         csr_colind = result["csr_colind"]
         csr_rowptr = result["csr_rowptr"]
@@ -102,6 +110,18 @@ def test_csr_conversion():
             print(f"✓ Tcolsums matches, difference = {Tcolsums_diff}")
         else:
             print(f"✗ Tcolsums does not match, difference = {Tcolsums_diff}")
+        
+        objfn_diff = np.abs(objfn - result["objfn"])
+        if objfn_diff < 1e-8:
+            print(f"✓ Objfn matches, difference = {objfn_diff}")
+        else:
+            print(f"✗ Objfn does not match, difference = {objfn_diff}")
+        
+        grad_diff = np.linalg.norm(grad - result["grad"])
+        if grad_diff < 1e-8:
+            print(f"✓ Grad matches, difference = {grad_diff}")
+        else:
+            print(f"✗ Grad does not match, difference = {grad_diff}")
 
         val_diff = np.linalg.norm(Hsl.data - csr_val)
         if val_diff < 1e-8:

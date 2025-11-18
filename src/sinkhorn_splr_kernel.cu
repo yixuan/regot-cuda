@@ -259,10 +259,10 @@ __global__ void obj_grad_kernel(
         double val_ab = ab[i];
         double val_gamma = gamma[i];
 
-        // Task 1: accumulate dot product
+        // Task 1: Accumulate dot product
         local_dotprod += val_ab * val_gamma;
 
-        // Task 2: calculate gradient
+        // Task 2: Calculate gradient
         // Note that grad is only [n + m - 1]
         if (i < n)
         {
@@ -311,7 +311,7 @@ __global__ void obj_grad_kernel(
         }
         
         // Use warp shuffle reduction again
-        for (int s = warpSize / 2; s > 0; s >> 1) {
+        for (int s = warpSize / 2; s > 0; s >>= 1) {
             block_sum += __shfl_down_sync(mask, block_sum, s);
         }
 
@@ -368,29 +368,34 @@ __global__ void write_diagonal_kernel(
 // Given alpha, beta, M (all on device), and reg:
 // 1. Compute T matrix
 // 2. Compute row/column/total sums of T
-// 3. The largest K elements of (T_t)' are stored in the first K elements in d_values
-// 4. The corresponding (flattened) indices are stored in d_indices
-// 5. Add diagonal elements of Hsl matrix to d_values and corresponding indices to d_indices
+// 3. Compute objective function f and gradient g
+// 4. The largest K elements of (T_t)' are stored in the first K elements in d_values
+// 5. The corresponding (flattened) indices are stored in d_indices
+// 6. Add diagonal elements of Hsl matrix to d_values and corresponding indices to d_indices
 //    (overwrite d_values[K:] and d_indices[K:])
-// 6. The first (K+N) elements in d_indices are in ascending order, N = Hsize = n+m-1
+// 7. The first (K+N) elements in d_indices are in ascending order, N = Hsize = n+m-1
 //
 // Assume K+N = K+n+m-1 <= n*(m-1), or we can simply allocate n*(m-1)+n+m-1=(n+1)*m-1 elements
 // for d_values and d_indices
 //
-// In: d_alpha     [n]
-// In: d_beta      [m]
+// In: d_gamma     [n+m]        d_gamma = (d_alpha, d_beta)
 // In: d_M         [n*m]
+// In: d_ab        [n+m]
 // Out: d_Trowsums [n]
 // Out: d_Tcolsums [m]
 // Out: d_Tsum     [1]
+// Out: d_objfn    [1]
+// Out: d_grad     [n+m-1]
 // Out: d_values   [n*(m-1)]
 // Out: d_indices  [n*(m-1)]
 void launch_T_computation(
     const double* d_gamma,
     const double* d_M,
+    const double* d_ab,
     double reg,
     int n, int m, int K,
     double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
+    double* d_objfn, double* d_grad,
     double* d_values, int* d_indices
 )
 {
@@ -423,9 +428,19 @@ void launch_T_computation(
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
 
+    // Step 3: Compute objfn and grad
+    dim3 threadsPerBlock(BLOCK_DIM);
+    dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
+        d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
+        reg, n, m,
+        d_objfn, d_grad
+    );
+    // No synchronization here since Step 3 and Step 4 are independent
+
     // Currently we do have a good Top-K implementation,
     // so we directly sort the T values
-    // Step 3: Call thrust::sort_by_key to sort T values
+    // Step 4: Call thrust::sort_by_key to sort T values
 
     // Wrap raw device pointers with thrust::device_ptr
     thrust::device_ptr<double> d_values_ptr = thrust::device_pointer_cast(d_values);
@@ -441,18 +456,17 @@ void launch_T_computation(
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
 
-    // Step 4: Add diagonal elements of Hsl to (values, indices)
+    // Step 5: Add diagonal elements of Hsl to (values, indices)
     // We no longer need values[K:] and indices[K:], so we overwrite these addresses
     int Hsize = n + m - 1;
-    dim3 threadsPerBlock(BLOCK_DIM);
-    dim3 numBlocks((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    write_diagonal_kernel<<<numBlocks, threadsPerBlock>>>(
+    dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
         d_Trowsums, d_Tcolsums, n, m, d_values + Ks, d_indices + Ks
     );
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
 
-    // Step 5: Call thrust::sort_by_key on the first (K+Hsize) elements to sort indices (ascending order)
+    // Step 6: Call thrust::sort_by_key on the first (K+Hsize) elements to sort indices (ascending order)
     thrust::sort_by_key(
         d_indices_ptr,
         d_indices_ptr + (Ks + Hsize),
@@ -610,6 +624,7 @@ void T_computation_sparsify_host(
     double reg,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
+    double* objfn, double* grad,
     double* values, int* indices,
     double* csr_val, int* csr_rowptr, int* csr_colind
 )
@@ -632,16 +647,20 @@ void T_computation_sparsify_host(
     size_t N_total = Te + Hsize;
 
     // Allocate device memory
-    double *d_gamma, *d_M;
+    double *d_gamma, *d_M, *d_ab;
     double *d_Trowsums, *d_Tcolsums, *d_Tsum, *d_values;
+    double *d_objfn, *d_grad;
     int *d_indices, *d_csr_rowptr, *d_csr_colind, *d_row_counts;
 
     CUDA_CHECK(cudaMalloc(&d_gamma, (n + m) * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_M, Me * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_ab, (n + m) * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Trowsums, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tcolsums, m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tsum, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_values, N_total * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_grad, (n + m - 1) * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_indices, N_total * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_colind, nnz * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (Hsize + 1) * sizeof(int)));
@@ -650,20 +669,25 @@ void T_computation_sparsify_host(
     // Pointer aliases
     double* d_alpha = d_gamma;
     double* d_beta = d_gamma + n;
+    double* d_a = d_ab;
+    double* d_b = d_ab + n;
 
     // Copy input data from host to device
     CUDA_CHECK(cudaMemcpy(d_alpha, alpha, n * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_beta, beta, m * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_M, M, Me * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_a, a, n * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b, b, m * sizeof(double), cudaMemcpyHostToDevice));
 
     // Launch computation
     // Multiple runs for benchmarking
     for (int i = 0; i < nrun; i++)
     {
         launch_T_computation(
-            d_gamma, d_M,
+            d_gamma, d_M, d_ab,
             reg, n, m, Ks,
             d_Trowsums, d_Tcolsums, d_Tsum,
+            d_objfn, d_grad,
             d_values, d_indices
         );
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -684,6 +708,8 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMemcpy(Trowsums, d_Trowsums, n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tcolsums, d_Tcolsums, m * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tsum, d_Tsum, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(objfn, d_objfn, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(grad, d_grad, (n + m - 1) * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(values, d_values, N_total * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(indices, d_indices, N_total * sizeof(int), cudaMemcpyDeviceToHost));
 
@@ -695,10 +721,13 @@ void T_computation_sparsify_host(
     // Free device memory
     CUDA_CHECK(cudaFree(d_gamma));
     CUDA_CHECK(cudaFree(d_M));
+    CUDA_CHECK(cudaFree(d_ab));
     CUDA_CHECK(cudaFree(d_Trowsums));
     CUDA_CHECK(cudaFree(d_Tcolsums));
     CUDA_CHECK(cudaFree(d_Tsum));
     CUDA_CHECK(cudaFree(d_values));
+    CUDA_CHECK(cudaFree(d_objfn));
+    CUDA_CHECK(cudaFree(d_grad));
     CUDA_CHECK(cudaFree(d_indices));
     CUDA_CHECK(cudaFree(d_csr_colind));
     CUDA_CHECK(cudaFree(d_csr_rowptr));
