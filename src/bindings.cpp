@@ -22,6 +22,16 @@ extern "C" void T_computation_sparsify_host(
     double* csr_val, int* csr_rowptr, int* csr_colind
 );
 
+extern "C" void sparse_cholesky_solve_host(
+    const double* values,
+    const int* colind,
+    const int* rowptr,
+    const double* rhs,
+    double* x,
+    int n,
+    int nnz
+);
+
 namespace py = pybind11;
 
 // Python interface for sinkhorn_bcd function
@@ -224,6 +234,56 @@ py::dict test_T_computation_sparsify(
     return result;
 }
 
+// Python interface for sparse Cholesky solver
+py::array_t<double> test_sparse_cholesky_solve(
+    py::array_t<double> values,
+    py::array_t<int> colind,
+    py::array_t<int> rowptr,
+    py::array_t<double> rhs
+)
+{
+    // Get input array info
+    py::buffer_info values_buf = values.request();
+    py::buffer_info colind_buf = colind.request();
+    py::buffer_info rowptr_buf = rowptr.request();
+    py::buffer_info rhs_buf = rhs.request();
+
+    if (values_buf.ndim != 1 || colind_buf.ndim != 1 || rowptr_buf.ndim != 1 || rhs_buf.ndim != 1)
+    {
+        throw std::runtime_error("All inputs must be 1D arrays");
+    }
+
+    int nnz = values_buf.shape[0];
+    int n_rhs = rhs_buf.shape[0];
+    int n = rowptr_buf.shape[0] - 1;  // rowptr has length n+1
+
+    if (colind_buf.shape[0] != nnz)
+    {
+        throw std::runtime_error("values and colind must have the same length");
+    }
+
+    if (n_rhs != n)
+    {
+        throw std::runtime_error("rhs length must equal matrix dimension (rowptr length - 1)");
+    }
+
+    // Get raw pointers
+    const double* values_ptr = static_cast<const double*>(values_buf.ptr);
+    const int* colind_ptr = static_cast<const int*>(colind_buf.ptr);
+    const int* rowptr_ptr = static_cast<const int*>(rowptr_buf.ptr);
+    const double* rhs_ptr = static_cast<const double*>(rhs_buf.ptr);
+
+    // Create output array for solution
+    py::array_t<double> x = py::array_t<double>(n);
+    py::buffer_info x_buf = x.request();
+    double* x_ptr = static_cast<double*>(x_buf.ptr);
+
+    // Call CUDA function
+    sparse_cholesky_solve_host(values_ptr, colind_ptr, rowptr_ptr, rhs_ptr, x_ptr, n, nnz);
+
+    return x;
+}
+
 // PYBIND11 module definition
 PYBIND11_MODULE(_internal, m)
 {
@@ -239,4 +299,7 @@ PYBIND11_MODULE(_internal, m)
           py::arg("nrun") = 1,
           "Test T computation and sparsification (CUDA implementation)");
 
+    m.def("test_sparse_cholesky_solve", &test_sparse_cholesky_solve,
+          py::arg("values"), py::arg("colind"), py::arg("rowptr"), py::arg("rhs"),
+          "Test sparse Cholesky solver using cuDSS (CUDA implementation)");
 }
