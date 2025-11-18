@@ -22,6 +22,8 @@ void T_computation_sparsify_host(
     const double* alpha,
     const double* beta,
     const double* M,
+    const double* a,
+    const double* b,
     double reg,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
@@ -236,6 +238,8 @@ py::dict test_T_computation_sparsify(
     py::array_t<double> alpha,
     py::array_t<double> beta,
     py::array_t<double> M,
+    py::array_t<double> a,
+    py::array_t<double> b,
     double reg,
     int K,
     int nrun
@@ -245,10 +249,12 @@ py::dict test_T_computation_sparsify(
     py::buffer_info alpha_buf = alpha.request();
     py::buffer_info beta_buf = beta.request();
     py::buffer_info M_buf = M.request();
+    py::buffer_info a_buf = a.request();
+    py::buffer_info b_buf = b.request();
 
-    if (alpha_buf.ndim != 1 || beta_buf.ndim != 1)
+    if (alpha_buf.ndim != 1 || beta_buf.ndim != 1 || a_buf.ndim != 1 || b_buf.ndim != 1)
     {
-        throw std::runtime_error("alpha and beta must be 1D arrays");
+        throw std::runtime_error("alpha, beta, a, and b must be 1D arrays");
     }
     if (M_buf.ndim != 2)
     {
@@ -260,7 +266,11 @@ py::dict test_T_computation_sparsify(
 
     if (M_buf.shape[0] != n || M_buf.shape[1] != m)
     {
-        throw std::runtime_error("Shape mismatch: M should be [n x m] where n=len(alpha) and m=len(beta)");
+        throw std::runtime_error("Shape mismatch: M should be [n x m], where n=len(alpha) and m=len(beta)");
+    }
+    if (a_buf.shape[0] != n || b_buf.shape[0] != m)
+    {
+        throw std::runtime_error("Shape mismatch: a should be [n], and b should be [m], where n=len(alpha) and m=len(beta)");
     }
 
     // Bound check for K
@@ -282,6 +292,8 @@ py::dict test_T_computation_sparsify(
     const double* alpha_ptr = static_cast<const double*>(alpha_buf.ptr);
     const double* beta_ptr = static_cast<const double*>(beta_buf.ptr);
     const double* M_ptr = static_cast<const double*>(M_buf.ptr);
+    const double* a_ptr = static_cast<const double*>(a_buf.ptr);
+    const double* b_ptr = static_cast<const double*>(b_buf.ptr);
 
     // Create output arrays for T computation
     py::array_t<double> Trowsums = py::array_t<double>(n);
@@ -314,7 +326,7 @@ py::dict test_T_computation_sparsify(
     double Tsum;
     T_computation_sparsify_host(
         nrun,
-        alpha_ptr, beta_ptr, M_ptr, reg, n, m, Ks,
+        alpha_ptr, beta_ptr, M_ptr, a_ptr, b_ptr, reg, n, m, Ks,
         Trowsums_ptr, Tcolsums_ptr, &Tsum, values_ptr, indices_ptr,
         val_ptr, rowptr_ptr, colind_ptr
     );
@@ -402,7 +414,7 @@ PYBIND11_MODULE(_internal, m)
           "Sinkhorn SPLR algorithm (CUDA implementation)");
 
     m.def("test_T_computation_sparsify", &test_T_computation_sparsify,
-          py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("reg"), py::arg("K"),
+          py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"), py::arg("K"),
           py::arg("nrun") = 1,
           "Test T computation and sparsification (CUDA implementation)");
 

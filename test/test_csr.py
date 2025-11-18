@@ -25,6 +25,10 @@ def test_csr_conversion():
     alpha = np.random.normal(scale=0.1, size=n)
     beta = np.random.normal(scale=0.1, size=m)
     M = np.abs(np.random.normal(scale=0.1, size=(n, m)))
+    a = np.random.uniform(size=n)
+    b = np.random.uniform(size=m)
+    a = a / np.sum(a)
+    b = b / np.sum(b)
     T = np.exp((alpha.reshape(n, 1) + beta.reshape(1, m) - M) / reg)
 
     print("=== Input Data ===")
@@ -64,7 +68,7 @@ def test_csr_conversion():
 
     try:
         # Call the function
-        result = curegot.test_T_computation_sparsify(alpha, beta, M, reg, K, nrun=1)
+        result = curegot.test_T_computation_sparsify(alpha, beta, M, a, b, reg, K, nrun=1)
 
         print(f"\n=== T Computation Results ===")
         print(f"Total sum: {result['Tsum']:.6f}")
