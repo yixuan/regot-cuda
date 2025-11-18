@@ -3,6 +3,11 @@
 #include <cmath>
 #include <iostream>
 
+// Define block dimensions (16x16 = 256 threads)
+#define BLOCK_DIM_X 16
+#define BLOCK_DIM_Y 16
+#define BLOCK_DIM 256
+
 // CUDA kernel for computing optimal beta given alpha
 __global__ void optimal_beta_kernel(
     const double* __restrict__ M,
@@ -292,7 +297,7 @@ double compute_l2_norm_cuda(double* d_vec1, double* d_vec2, int size)
     cudaMalloc(&d_error, sizeof(double));
     cudaMemset(d_error, 0, sizeof(double));
 
-    dim3 threadsPerBlock(256);
+    dim3 threadsPerBlock(BLOCK_DIM);
     dim3 numBlocks((size + threadsPerBlock.x - 1) / threadsPerBlock.x);
     size_t sharedMemory = threadsPerBlock.x * sizeof(double);
 
@@ -360,7 +365,7 @@ void cuda_sinkhorn_bcd(
     cudaMemset(d_beta_prev, 0, m * sizeof(double));
 
     // Configure kernel launch parameters
-    dim3 threadsPerBlock(256);
+    dim3 threadsPerBlock(BLOCK_DIM);
     // Now each block handles one row/column, so we need n blocks for alpha and m blocks for beta
     // One block per row
     dim3 numBlocks_alpha(n);
@@ -429,10 +434,11 @@ void cuda_sinkhorn_bcd(
     }
 
     // Compute final transport plan
-    dim3 threadsPerBlock_2d(16, 16);
-    dim3 numBlocks_2d((m + threadsPerBlock_2d.x - 1) / threadsPerBlock_2d.x,
-                      (n + threadsPerBlock_2d.y - 1) / threadsPerBlock_2d.y);
-    compute_transport_plan_kernel<<<numBlocks_2d, threadsPerBlock_2d>>>(
+    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
+    dim3 gridDim;
+    gridDim.x = (m + blockDim.x - 1) / blockDim.x;
+    gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+    compute_transport_plan_kernel<<<gridDim, blockDim>>>(
         d_M, d_alpha, d_beta, d_P, reg, n, m
     );
     cudaDeviceSynchronize();

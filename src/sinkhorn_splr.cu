@@ -3,6 +3,11 @@
 #include <cmath>
 #include <iostream>
 
+// Define block dimensions (16x16 = 256 threads)
+#define BLOCK_DIM_X 16
+#define BLOCK_DIM_Y 16
+#define BLOCK_DIM 256
+
 // Host function to compute log of vectors
 // From sinkhorn_bcd_kernel.cu
 void compute_log_vector(const double* x, double* log_x, int size);
@@ -88,7 +93,7 @@ void cuda_sinkhorn_splr(
         cudaMemset(d_gamma + n, 0, m * sizeof(double));
         // Optimal alpha given beta
         // Configure kernel launch parameters
-        dim3 threadsPerBlock(256);
+        dim3 threadsPerBlock(BLOCK_DIM);
         // Now each block handles one row, so we need n blocks for alpha
         dim3 numBlocks_alpha(n);
         // Calculate shared memory size
@@ -110,10 +115,11 @@ void cuda_sinkhorn_splr(
     }
 
     // Compute final transport plan
-    dim3 threadsPerBlock_2d(16, 16);
-    dim3 numBlocks_2d((m + threadsPerBlock_2d.x - 1) / threadsPerBlock_2d.x,
-                      (n + threadsPerBlock_2d.y - 1) / threadsPerBlock_2d.y);
-    compute_transport_plan_kernel<<<numBlocks_2d, threadsPerBlock_2d>>>(
+    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
+    dim3 gridDim;
+    gridDim.x = (m + blockDim.x - 1) / blockDim.x;
+    gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+    compute_transport_plan_kernel<<<gridDim, blockDim>>>(
         d_M, d_alpha, d_beta, d_P, reg, n, m
     );
     cudaDeviceSynchronize();
