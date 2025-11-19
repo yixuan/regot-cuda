@@ -254,15 +254,6 @@ __global__ void compute_transport_plan_kernel(
     }
 }
 
-// Host function to compute log of vectors
-void compute_log_vector(const double* x, double* log_x, int size)
-{
-    for (int i = 0; i < size; i++)
-    {
-        log_x[i] = std::log(x[i]);
-    }
-}
-
 // CUDA implementation of BCD algorithm for entropic-regularized OT
 void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
@@ -290,13 +281,9 @@ void cuda_sinkhorn_bcd(
     CUDA_CHECK(cudaMemcpy(d_a, a, n * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_b, b, m * sizeof(double), cudaMemcpyHostToDevice));
 
-    // Compute log vectors on host and copy to device
-    double* loga = new double[n];
-    double* logb = new double[m];
-    compute_log_vector(a, loga, n);
-    compute_log_vector(b, logb, m);
-    CUDA_CHECK(cudaMemcpy(d_loga, loga, n * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_logb, logb, m * sizeof(double), cudaMemcpyHostToDevice));
+    // Compute log vectors on device
+    compute_log_vector_cuda(d_a, d_loga, n);
+    compute_log_vector_cuda(d_b, d_logb, m);
 
     // Initialize alpha and beta
     if (x0 != nullptr)
@@ -415,8 +402,4 @@ void cuda_sinkhorn_bcd(
     CUDA_CHECK(cudaFree(d_alpha_prev));
     CUDA_CHECK(cudaFree(d_beta_prev));
     CUDA_CHECK(cudaFree(d_marginal));
-
-    // Free host memory
-    delete[] loga;
-    delete[] logb;
 }

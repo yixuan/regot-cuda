@@ -1,7 +1,12 @@
+#include <iostream>
+#include <cmath>
+
+// CUDA headers
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include <cmath>
-#include <iostream>
+
+// Utility functions
+#include "utils.h"
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -17,10 +22,6 @@
 #define BLOCK_DIM_X 16
 #define BLOCK_DIM_Y 16
 #define BLOCK_DIM 256
-
-// Host function to compute log of vectors
-// From sinkhorn_bcd_kernel.cu
-void compute_log_vector(const double* x, double* log_x, int size);
 
 // Kernel function to compute optimal alpha given beta
 // From sinkhorn_bcd_kernel.cu
@@ -104,11 +105,8 @@ void cuda_sinkhorn_splr(
     CUDA_CHECK(cudaMemcpy(d_ab, a, n * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_ab + n, b, m * sizeof(double), cudaMemcpyHostToDevice));
 
-    // Compute log vectors on host and copy to device
-    double* loga = new double[n];
-    compute_log_vector(a, loga, n);
-    CUDA_CHECK(cudaMemcpy(d_loga, loga, n * sizeof(double), cudaMemcpyHostToDevice));
-    delete[] loga;
+    // Compute log(a) on device
+    compute_log_vector_cuda(d_ab, d_loga, n);
 
     // Initialize alpha and beta
     if (x0 != nullptr)

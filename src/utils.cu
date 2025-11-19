@@ -190,3 +190,38 @@ double compute_l2_norm_cuda(double* d_vec, int size)
 
     return std::sqrt(result);
 }
+
+// CUDA kernel to compute elementwise logarithm using grid-stride loop
+__global__ void compute_log_vector_kernel(
+    const double* __restrict__ x,
+    double* __restrict__ logx,
+    int size
+)
+{
+    // Indices
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    // Grid-stride loop
+    // Similar to "if (idx < size)" but handles arbitrary vector size
+    // Even if size > gridDim * blockDim, the loop will cover all elements
+    for (int i = idx; i < size; i += stride)
+    {
+        logx[i] = std::log(x[i]);
+    }
+}
+
+// Helper function to compute elementwise logarithm of a vector
+void compute_log_vector_cuda(const double* d_x, double* d_logx, int size)
+{
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 1024
+    // The grid-stride loop in compute_log_vector_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 1024);
+
+    compute_log_vector_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_x, d_logx, size
+    );
+}
