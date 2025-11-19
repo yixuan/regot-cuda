@@ -5,6 +5,9 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+// Utility functions
+#include "utils.h"
+
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
     do { \
@@ -232,48 +235,6 @@ __global__ void compute_marginal_b_kernel(
     }
 }
 
-// CUDA kernel for computing sum of squares of vector difference
-__global__ void compute_squared_l2_kernel(
-    const double* __restrict__ vec1,
-    const double* __restrict__ vec2,
-    double* __restrict__ error,
-    int size
-)
-{
-    extern __shared__ double shared_data[];
-
-    // Indices
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
-
-    // Load squared difference into shared memory
-    double squared_diff = 0.0;
-    if (idx < size)
-    {
-        double diff = vec1[idx] - vec2[idx];
-        squared_diff = diff * diff;
-    }
-    shared_data[tid] = squared_diff;
-
-    __syncthreads();
-
-    // Reduction in shared memory -- Compute partial sum
-    for (int s = blockDim.x / 2; s > 0; s >>= 1)
-    {
-        if (tid < s)
-        {
-            shared_data[tid] += shared_data[tid + s];
-        }
-        __syncthreads();
-    }
-
-    // Write result to global memory
-    if (tid == 0)
-    {
-        atomicAdd(error, shared_data[0]);
-    }
-}
-
 // CUDA kernel for computing final transport plan P
 __global__ void compute_transport_plan_kernel(
     const double* __restrict__ M,
@@ -300,29 +261,6 @@ void compute_log_vector(const double* x, double* log_x, int size)
     {
         log_x[i] = std::log(x[i]);
     }
-}
-
-// Helper function to compute L2 norm on device
-double compute_l2_norm_cuda(double* d_vec1, double* d_vec2, int size)
-{
-    double* d_error;
-    CUDA_CHECK(cudaMalloc(&d_error, sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_error, 0, sizeof(double)));
-
-    dim3 threadsPerBlock(BLOCK_DIM);
-    dim3 numBlocks((size + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    size_t sharedMemory = threadsPerBlock.x * sizeof(double);
-
-    compute_squared_l2_kernel<<<numBlocks, threadsPerBlock, sharedMemory>>>(
-        d_vec1, d_vec2, d_error, size
-    );
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    double error;
-    CUDA_CHECK(cudaMemcpy(&error, d_error, sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaFree(d_error));
-
-    return sqrt(error);
 }
 
 // CUDA implementation of BCD algorithm for entropic-regularized OT
@@ -412,9 +350,9 @@ void cuda_sinkhorn_bcd(
         // Check convergence using dual variable differences -- easier to compute
         if (!use_marginal_error)
         {
-            double alpha_diff = compute_l2_norm_cuda(d_alpha, d_alpha_prev, n);
-            double beta_diff = compute_l2_norm_cuda(d_beta, d_beta_prev, m);
-            double diff_error = hypot(alpha_diff, beta_diff);
+            double alpha_diff = compute_l2_distance_cuda(d_alpha, d_alpha_prev, n);
+            double beta_diff = compute_l2_distance_cuda(d_beta, d_beta_prev, m);
+            double diff_error = std::hypot(alpha_diff, beta_diff);
 
             if (diff_error < tol)
             {
@@ -433,7 +371,7 @@ void cuda_sinkhorn_bcd(
             );
             CUDA_CHECK(cudaDeviceSynchronize());
 
-            double marginal_error = compute_l2_norm_cuda(d_marginal, d_a, n);
+            double marginal_error = compute_l2_distance_cuda(d_marginal, d_a, n);
 
             if (marginal_error < tol)
             {
