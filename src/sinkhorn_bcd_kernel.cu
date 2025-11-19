@@ -1,7 +1,19 @@
+#include <iostream>
+#include <cmath>
+
+// CUDA headers
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include <cmath>
-#include <iostream>
+
+// CUDA error checking macro
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA Error at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
 
 // Define block dimensions (16x16 = 256 threads)
 #define BLOCK_DIM_X 16
@@ -294,8 +306,8 @@ void compute_log_vector(const double* x, double* log_x, int size)
 double compute_l2_norm_cuda(double* d_vec1, double* d_vec2, int size)
 {
     double* d_error;
-    cudaMalloc(&d_error, sizeof(double));
-    cudaMemset(d_error, 0, sizeof(double));
+    CUDA_CHECK(cudaMalloc(&d_error, sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_error, 0, sizeof(double)));
 
     dim3 threadsPerBlock(BLOCK_DIM);
     dim3 numBlocks((size + threadsPerBlock.x - 1) / threadsPerBlock.x);
@@ -304,11 +316,11 @@ double compute_l2_norm_cuda(double* d_vec1, double* d_vec2, int size)
     compute_squared_l2_kernel<<<numBlocks, threadsPerBlock, sharedMemory>>>(
         d_vec1, d_vec2, d_error, size
     );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     double error;
-    cudaMemcpy(&error, d_error, sizeof(double), cudaMemcpyDeviceToHost);
-    cudaFree(d_error);
+    CUDA_CHECK(cudaMemcpy(&error, d_error, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_error));
 
     return sqrt(error);
 }
@@ -323,46 +335,46 @@ void cuda_sinkhorn_bcd(
     // Allocate device memory
     double *d_M, *d_a, *d_b, *d_alpha, *d_beta, *d_loga, *d_logb, *d_P;
     double *d_alpha_prev, *d_beta_prev, *d_marginal;
-    cudaMalloc(&d_M, n * m * sizeof(double));
-    cudaMalloc(&d_a, n * sizeof(double));
-    cudaMalloc(&d_b, m * sizeof(double));
-    cudaMalloc(&d_alpha, n * sizeof(double));
-    cudaMalloc(&d_beta, m * sizeof(double));
-    cudaMalloc(&d_loga, n * sizeof(double));
-    cudaMalloc(&d_logb, m * sizeof(double));
-    cudaMalloc(&d_P, n * m * sizeof(double));
-    cudaMalloc(&d_alpha_prev, n * sizeof(double));
-    cudaMalloc(&d_beta_prev, m * sizeof(double));
-    cudaMalloc(&d_marginal, max(n, m) * sizeof(double));
+    CUDA_CHECK(cudaMalloc(&d_M, n * m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_a, n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_b, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_alpha, n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_beta, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_loga, n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_logb, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_P, n * m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_alpha_prev, n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_beta_prev, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_marginal, max(n, m) * sizeof(double)));
 
     // Copy input to device
-    cudaMemcpy(d_M, M, n * m * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a, a, n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, b, m * sizeof(double), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_M, M, n * m * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_a, a, n * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b, b, m * sizeof(double), cudaMemcpyHostToDevice));
 
     // Compute log vectors on host and copy to device
     double* loga = new double[n];
     double* logb = new double[m];
     compute_log_vector(a, loga, n);
     compute_log_vector(b, logb, m);
-    cudaMemcpy(d_loga, loga, n * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_logb, logb, m * sizeof(double), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(d_loga, loga, n * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_logb, logb, m * sizeof(double), cudaMemcpyHostToDevice));
 
     // Initialize alpha and beta
     if (x0 != nullptr)
     {
         // Use provided initial values: x0 contains [alpha (n elements), beta (m elements)]
-        cudaMemcpy(d_alpha, x0, n * sizeof(double), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_beta, x0 + n, m * sizeof(double), cudaMemcpyHostToDevice);
+        CUDA_CHECK(cudaMemcpy(d_alpha, x0, n * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_beta, x0 + n, m * sizeof(double), cudaMemcpyHostToDevice));
     }
     else
     {
         // Initialize to zero if no initial values provided
-        cudaMemset(d_alpha, 0, n * sizeof(double));
-        cudaMemset(d_beta, 0, m * sizeof(double));
+        CUDA_CHECK(cudaMemset(d_alpha, 0, n * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_beta, 0, m * sizeof(double)));
     }
-    cudaMemset(d_alpha_prev, 0, n * sizeof(double));
-    cudaMemset(d_beta_prev, 0, m * sizeof(double));
+    CUDA_CHECK(cudaMemset(d_alpha_prev, 0, n * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_beta_prev, 0, m * sizeof(double)));
 
     // Configure kernel launch parameters
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -382,20 +394,20 @@ void cuda_sinkhorn_bcd(
     for (int iter = 0; iter < max_iter; iter++)
     {
         // Store previous values for error checking
-        cudaMemcpy(d_alpha_prev, d_alpha, n * sizeof(double), cudaMemcpyDeviceToDevice);
-        cudaMemcpy(d_beta_prev, d_beta, m * sizeof(double), cudaMemcpyDeviceToDevice);
+        CUDA_CHECK(cudaMemcpy(d_alpha_prev, d_alpha, n * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(d_beta_prev, d_beta, m * sizeof(double), cudaMemcpyDeviceToDevice));
 
         // Optimal alpha given beta
         optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock, sharedMemory_alpha>>>(
             d_M, d_beta, d_loga, d_alpha, reg, n, m
         );
-        cudaDeviceSynchronize();
+        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Optimal beta given alpha
         optimal_beta_kernel<<<numBlocks_beta, threadsPerBlock, sharedMemory_beta>>>(
             d_M, d_alpha, d_logb, d_beta, reg, n, m
         );
-        cudaDeviceSynchronize();
+        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Check convergence using dual variable differences -- easier to compute
         if (!use_marginal_error)
@@ -419,7 +431,7 @@ void cuda_sinkhorn_bcd(
             compute_marginal_a_kernel<<<numBlocks_alpha, threadsPerBlock>>>(
                 d_M, d_alpha, d_beta, d_marginal, reg, n, m
             );
-            cudaDeviceSynchronize();
+            CUDA_CHECK(cudaDeviceSynchronize());
 
             double marginal_error = compute_l2_norm_cuda(d_marginal, d_a, n);
 
@@ -441,30 +453,30 @@ void cuda_sinkhorn_bcd(
     compute_transport_plan_kernel<<<gridDim, blockDim>>>(
         d_M, d_alpha, d_beta, d_P, reg, n, m
     );
-    cudaDeviceSynchronize();
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Copy result back to host
-    cudaMemcpy(P, d_P, n * m * sizeof(double), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(P, d_P, n * m * sizeof(double), cudaMemcpyDeviceToHost));
 
     // Copy dual variables back to host if requested
     if (dual != nullptr)
     {
-        cudaMemcpy(dual, d_alpha, n * sizeof(double), cudaMemcpyDeviceToHost);
-        cudaMemcpy(dual + n, d_beta, m * sizeof(double), cudaMemcpyDeviceToHost);
+        CUDA_CHECK(cudaMemcpy(dual, d_alpha, n * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(dual + n, d_beta, m * sizeof(double), cudaMemcpyDeviceToHost));
     }
 
     // Free device memory
-    cudaFree(d_M);
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_alpha);
-    cudaFree(d_beta);
-    cudaFree(d_loga);
-    cudaFree(d_logb);
-    cudaFree(d_P);
-    cudaFree(d_alpha_prev);
-    cudaFree(d_beta_prev);
-    cudaFree(d_marginal);
+    CUDA_CHECK(cudaFree(d_M));
+    CUDA_CHECK(cudaFree(d_a));
+    CUDA_CHECK(cudaFree(d_b));
+    CUDA_CHECK(cudaFree(d_alpha));
+    CUDA_CHECK(cudaFree(d_beta));
+    CUDA_CHECK(cudaFree(d_loga));
+    CUDA_CHECK(cudaFree(d_logb));
+    CUDA_CHECK(cudaFree(d_P));
+    CUDA_CHECK(cudaFree(d_alpha_prev));
+    CUDA_CHECK(cudaFree(d_beta_prev));
+    CUDA_CHECK(cudaFree(d_marginal));
 
     // Free host memory
     delete[] loga;
