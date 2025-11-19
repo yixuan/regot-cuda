@@ -13,7 +13,8 @@ void cuda_sinkhorn_bcd(
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    const double* x0, double* dual
+    double density_max,
+    const double* x0 = nullptr, double* dual = nullptr
 );
 
 // Testing functions
@@ -181,7 +182,6 @@ py::dict sinkhorn_splr(
     // Handle kwargs for initial values (x0)
     const double* x0_ptr = nullptr;
     std::vector<double> x0_storage;
-
     if (kwargs.contains("x0"))
     {
         py::array_t<double> x0 = py::cast<py::array_t<double>>(kwargs["x0"]);
@@ -198,6 +198,16 @@ py::dict sinkhorn_splr(
         x0_ptr = x0_storage.data();
     }
 
+    // Get density_max from kwargs
+    // Default to 0.01
+    double density_max = 0.01;
+    if (kwargs.contains("density"))
+    {
+        density_max = py::cast<double>(kwargs["x0"]);
+        density_max = std::min(density_max, 1.0);
+        density_max = std::max(density_max, 0.0);
+    }
+
     // Create output arrays
     py::array_t<double> P = py::array_t<double>({n, m});
     py::buffer_info P_buf = P.request();
@@ -209,7 +219,7 @@ py::dict sinkhorn_splr(
 
     // Call CUDA function for BCD algorithm
     int niter = 0;
-    cuda_sinkhorn_splr(M_ptr, a_ptr, b_ptr, P_ptr, reg, max_iter, tol, n, m, &niter, x0_ptr, dual_ptr);
+    cuda_sinkhorn_splr(M_ptr, a_ptr, b_ptr, P_ptr, reg, max_iter, tol, n, m, &niter, density_max, x0_ptr, dual_ptr);
 
     // Create result dictionary
     py::dict result;
