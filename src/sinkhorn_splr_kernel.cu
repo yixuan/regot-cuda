@@ -658,13 +658,13 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMalloc(&d_Trowsums, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tcolsums, m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tsum, sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_values, N_total * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_grad, (n + m - 1) * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_values, N_total * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_indices, N_total * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_colind, nnz * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (Hsize + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_row_counts, nnz * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_row_counts, Hsize * sizeof(int)));
 
     // Pointer aliases
     double* d_alpha = d_gamma;
@@ -725,9 +725,9 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaFree(d_Trowsums));
     CUDA_CHECK(cudaFree(d_Tcolsums));
     CUDA_CHECK(cudaFree(d_Tsum));
-    CUDA_CHECK(cudaFree(d_values));
     CUDA_CHECK(cudaFree(d_objfn));
     CUDA_CHECK(cudaFree(d_grad));
+    CUDA_CHECK(cudaFree(d_values));
     CUDA_CHECK(cudaFree(d_indices));
     CUDA_CHECK(cudaFree(d_csr_colind));
     CUDA_CHECK(cudaFree(d_csr_rowptr));
