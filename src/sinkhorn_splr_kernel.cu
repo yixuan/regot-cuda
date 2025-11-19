@@ -219,7 +219,7 @@ __global__ void T_fused_kernel(
     }
 }
 
-// CUDA kernel to compute objective function (f) and gradient (g)
+// CUDA kernel to compute objective function value (f) and gradient (g)
 //
 // f = reg * sum(T) - <alpha, a> - <beta, b>
 // g = (Trowsums - a, Tcolsums_t - b_t)
@@ -333,10 +333,10 @@ __global__ void obj_grad_kernel(
 
 // CUDA kernel to write diagonal elements of Hsl to flattened value and index pointers
 //
-// Trowsums [n]
-// Tcolsums [m]
-// values   [n+m-1]
-// indices  [n+m-1]
+// In: Trowsums  [n]
+// In: Tcolsums  [m]
+// Out: values   [n+m-1]
+// OUt: indices  [n+m-1]
 __global__ void write_diagonal_kernel(
     const double* __restrict__ Trowsums, 
     const double* __restrict__ Tcolsums,
@@ -363,12 +363,12 @@ __global__ void write_diagonal_kernel(
     }
 }
 
-// Helper function to launch CUDA kernel on device
+// Helper function to launch CUDA computations on T
 //
-// Given alpha, beta, M (all on device), and reg:
+// Given gamma = (alpha, beta), M, and ab = (a, b) (all on device), and reg:
 // 1. Compute T matrix
 // 2. Compute row/column/total sums of T
-// 3. Compute objective function f and gradient g
+// 3. Compute objective function value objfn and gradient grad
 // 4. The largest K elements of (T_t)' are stored in the first K elements in d_values
 // 5. The corresponding (flattened) indices are stored in d_indices
 // 6. Add diagonal elements of Hsl matrix to d_values and corresponding indices to d_indices
@@ -378,16 +378,16 @@ __global__ void write_diagonal_kernel(
 // Assume K+N = K+n+m-1 <= n*(m-1), or we can simply allocate n*(m-1)+n+m-1=(n+1)*m-1 elements
 // for d_values and d_indices
 //
-// In: d_gamma     [n+m]        d_gamma = (d_alpha, d_beta)
-// In: d_M         [n*m]
-// In: d_ab        [n+m]
-// Out: d_Trowsums [n]
-// Out: d_Tcolsums [m]
-// Out: d_Tsum     [1]
-// Out: d_objfn    [1]
-// Out: d_grad     [n+m-1]
-// Out: d_values   [n*(m-1)]
-// Out: d_indices  [n*(m-1)]
+// In: d_gamma      [n+m]        d_gamma = (d_alpha, d_beta)
+// In: d_M          [n*m]
+// In: d_ab         [n+m]
+// Out: d_Trowsums  [n]
+// Out: d_Tcolsums  [m]
+// Out: d_Tsum      [1]
+// Out: d_objfn     [1]
+// Out: d_grad      [n+m-1]
+// Out: d_values    [n*(m-1)+n+m-1]
+// Out: d_indices   [n*(m-1)+n+m-1]
 void launch_T_computation(
     const double* d_gamma,
     const double* d_M,
@@ -474,11 +474,11 @@ void launch_T_computation(
     );
 }
 
-// Extract column indices and count the number of elements per row
+// CUDA kernel to extract column indices and count the number of elements per row
 //
-// In: indices [nnz]
-// Out: colind [nnz]
-// Out: row_counts [cols]
+// In: indices      [nnz]
+// Out: colind      [nnz]
+// Out: row_counts  [cols]
 __global__ void extract_columns_and_count_kernel(
     const int* __restrict__ indices,
     int* __restrict__ colind,
@@ -505,10 +505,10 @@ __global__ void extract_columns_and_count_kernel(
 
 // Helper function to convert sorted indices to CSR format
 //
-// Input: d_indices [nnz] = [K+Hsize] = [K+n+m-1]
-// Output: d_colind [nnz]
-// Output: d_rowptr [Hsize + 1] = [n+m]
-// Working space: d_row_counts [Hsize] = [n+m-1]
+// In: d_indices                [nnz] = [K+Hsize] = [K+n+m-1]
+// Out: d_colind                [nnz]
+// Out: d_rowptr                [Hsize + 1] = [n+m]
+// Working space: d_row_counts  [Hsize] = [n+m-1]
 void launch_csr_conversion(
     const int* d_indices,
     int* d_colind,
@@ -558,13 +558,13 @@ void launch_csr_conversion(
 // H is given in CSR format: values, colind, rowptr
 // Only the lower triangular part is used
 //
-// Input: d_values   [nnz] -- non-zero values of H in CSR format
-// Input: d_colind   [nnz] -- column indices
-// Input: d_rowptr   [n+1] -- row pointers
-// Input: d_rhs      [n]   -- right-hand side vector
-// Output: d_x       [n]   -- solution vector
-// Input: n          [int] -- matrix dimension
-// Input: nnz        [int] -- number of non-zero elements
+// In: d_values  [nnz]  -- non-zero values of H in CSR format
+// In: d_colind  [nnz]  -- column indices
+// In: d_rowptr  [n+1]  -- row pointers
+// In: d_rhs     [n]    -- right-hand side vector
+// Out: d_x      [n]    -- solution vector
+// In: n         [int]  -- matrix dimension
+// In: nnz       [int]  -- number of non-zero elements
 void sparse_cholesky_solve(
     double* d_values,
     int* d_colind,
