@@ -554,6 +554,58 @@ void launch_csr_conversion(
     CUDA_CHECK(cudaFree(d_temp_storage));
 }
 
+// Helper function to compute objective function value objfn,
+// gradient grad, and sparsified Hessian in CSR form
+//
+// In: d_gamma     [n+m]  d_gamma = (d_alpha, d_beta)
+// In: d_M         [n*m]
+// In: d_ab        [n+m]
+// Out: d_objfn    [1]
+// Out: d_grad     [Hsize] = [n+m-1]
+// Out: d_Hvalues  [nnz] = [K+Hsize] = [K+n+m-1], reserve [n*(m-1)+n+m-1]
+// Out: d_Hcolind  [nnz], reserve [Kmax+n+m-1]
+// Out: d_Hrowptr  [Hsize + 1] = [n+m]
+// Working space: d_work = (d_Trowsums, d_Tcolsums, d_Tsum), [n+m+1]
+// Working space: d_iwork = (d_indices, d_row_counts), [n*(m-1)+n+m-1] + [n+m-1] = [n*(m-1)+2*(n+m-1)]
+void launch_objfn_grad_sphess(
+    const double* d_gamma,
+    const double* d_M,
+    const double* d_ab,
+    double reg,
+    int n, int m, int K,
+    double* d_objfn, double* d_grad,
+    double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
+    double* d_work, int* d_iwork
+)
+{
+    // Dimensions
+    size_t Te = n * (m - 1);
+    size_t Hsize = n + m - 1;
+    size_t Ks = max(K, 1);
+    Ks = min(Ks, Te);
+
+    // Pointer aliases
+    double* d_Trowsums = d_work;
+    double* d_Tcolsums = d_work + n;
+    double* d_Tsum = d_work + (n + m);
+    int* d_indices = d_iwork;
+    int* d_row_counts = d_iwork + (Te + Hsize);
+
+    launch_T_computation(
+        d_gamma, d_M, d_ab,
+        reg, n, m, Ks,
+        d_Trowsums, d_Tcolsums, d_Tsum,
+        d_objfn, d_grad,
+        d_Hvalues, d_indices
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+
+    launch_csr_conversion(
+        d_indices, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
+    );
+}
+
 // Sparse Cholesky solver using cuDSS
 // Solves the linear system H * x = rhs where H is a symmetric positive definite matrix
 // H is given in CSR format: values, colind, rowptr
@@ -631,7 +683,8 @@ void T_computation_sparsify_host(
 )
 {
     // Total number of elements of M and T_t
-    size_t Me = n * m, Te = n * (m - 1);
+    size_t Me = n * m;
+    size_t Te = n * (m - 1);
 
     // Bound check for K
     size_t Ks = max(K, 1);
@@ -660,7 +713,7 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMalloc(&d_Tcolsums, m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_Tsum, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_grad, (n + m - 1) * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_grad, Hsize * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_values, N_total * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_indices, N_total * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_colind, nnz * sizeof(int)));
@@ -710,7 +763,7 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMemcpy(Tcolsums, d_Tcolsums, m * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tsum, d_Tsum, sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(objfn, d_objfn, sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(grad, d_grad, (n + m - 1) * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(grad, d_grad, Hsize * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(values, d_values, N_total * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(indices, d_indices, N_total * sizeof(int), cudaMemcpyDeviceToHost));
 
