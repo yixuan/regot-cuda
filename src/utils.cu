@@ -66,7 +66,7 @@ __device__ __forceinline__ double block_reduce_sum(double val)
 
 // CUDA kernel for computing sum of squares of vector difference
 __global__ void compute_squared_l2_distance_kernel(
-    const double* __restrict__ vec1, 
+    const double* __restrict__ vec1,
     const double* __restrict__ vec2,
     double* __restrict__ result,
     int size
@@ -111,12 +111,75 @@ double compute_l2_distance_cuda(double* d_vec1, double* d_vec2, int size)
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
     // Limit number of blocks to 256
-    // The grid-stride loop in compute_squared_l2_kernel()
+    // The grid-stride loop in compute_squared_l2_distance_kernel()
     // will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
 
     compute_squared_l2_distance_kernel<<<numBlocks, threadsPerBlock>>>(
         d_vec1, d_vec2, d_result, size
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copy back to host
+    double result;
+    CUDA_CHECK(cudaMemcpy(&result, d_result, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_result));
+
+    return std::sqrt(result);
+}
+
+// CUDA kernel for computing the squared l2 norm of a vector
+__global__ void compute_squared_l2_norm_kernel(
+    const double* __restrict__ vec,
+    double* __restrict__ result,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    double sum_of_squares = 0.0;
+
+    // Grid-stride loop
+    // Similar to "if (idx < size)" but handles arbitrary vector size
+    for (int i = idx; i < size; i += stride)
+    {
+        double val = vec[i];
+        sum_of_squares += val * val;
+    }
+
+    // Intra-block reduce
+    // Sums up results within this block
+    // Stored in the first thread of the block
+    sum_of_squares = block_reduce_sum(sum_of_squares);
+
+    // The first thread of the block adds the block's sum to the global memory
+    if (tid == 0)
+    {
+        // result must be initialized to zero
+        atomicAdd(result, sum_of_squares);
+    }
+}
+
+// Helper function to compute the l2 norm of a vector on device
+double compute_l2_norm_cuda(double* d_vec, int size)
+{
+    // Initialize result to zero
+    double* d_result;
+    CUDA_CHECK(cudaMalloc(&d_result, sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(double)));
+
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in compute_squared_l2_norm_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+
+    compute_squared_l2_norm_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_vec, d_result, size
     );
     CUDA_CHECK(cudaDeviceSynchronize());
 
