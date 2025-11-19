@@ -414,6 +414,7 @@ void launch_T_computation(
     CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
 
     // Step 2: Launch the fused kernel
     dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
