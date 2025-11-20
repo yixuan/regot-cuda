@@ -3,6 +3,8 @@
 #include <pybind11/stl.h>
 #include <iostream>
 
+#include "linsolve.h"
+
 // Main solver functions
 void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
@@ -31,16 +33,6 @@ void T_computation_sparsify_host(
     double* objfn, double* grad,
     double* values, int* indices,
     double* csr_val, int* csr_rowptr, int* csr_colind
-);
-
-void sparse_cholesky_solve_host(
-    const double* values,
-    const int* colind,
-    const int* rowptr,
-    const double* rhs,
-    double* x,
-    int n,
-    int nnz
 );
 
 namespace py = pybind11;
