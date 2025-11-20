@@ -75,7 +75,7 @@ __global__ void optimal_beta_kernel(
         for (int i = tid; i < n; i += block_size)
         {
             double D_ij = (alpha[i] - M[i * m + j]) / reg;
-            local_sum += exp(D_ij - global_max);
+            local_sum += std::exp(D_ij - global_max);
         }
 
         // Reduce sum across all threads in the block
@@ -96,7 +96,7 @@ __global__ void optimal_beta_kernel(
         // First thread writes the result
         if (tid == 0)
         {
-            double log_sum = global_max + log(global_sum);
+            double log_sum = global_max + std::log(global_sum);
             beta[j] = reg * (logb[j] - log_sum);
         }
     }
@@ -154,7 +154,7 @@ __global__ void optimal_alpha_kernel(
         for (int j = tid; j < m; j += block_size)
         {
             double D_ij = (beta[j] - M[i * m + j]) / reg;
-            local_sum += exp(D_ij - global_max);
+            local_sum += std::exp(D_ij - global_max);
         }
 
         // Reduce sum across all threads in the block
@@ -175,7 +175,7 @@ __global__ void optimal_alpha_kernel(
         // First thread writes the result
         if (tid == 0)
         {
-            double log_sum = global_max + log(global_sum);
+            double log_sum = global_max + std::log(global_sum);
         alpha[i] = reg * (loga[i] - log_sum);
         }
     }
@@ -202,7 +202,7 @@ __global__ void compute_marginal_a_kernel(
         for (int j = 0; j < m; j++)
         {
             // exp((alpha_i + beta_j - M_ij) / reg)
-            sum += exp((alpha_i + beta[j] - M_i[j]) / reg);
+            sum += std::exp((alpha_i + beta[j] - M_i[j]) / reg);
         }
         marginal_a[i] = sum;
     }
@@ -229,7 +229,7 @@ __global__ void compute_marginal_b_kernel(
         for (int i = 0; i < n; i++, Mj += m)
         {
             // exp((alpha_i + beta_j - M_ij) / reg)
-            sum += exp((alpha[i] + beta_j - *Mj) / reg);
+            sum += std::exp((alpha[i] + beta_j - *Mj) / reg);
         }
         marginal_b[j] = sum;
     }
@@ -250,7 +250,7 @@ __global__ void compute_transport_plan_kernel(
 
     if (i < n && j < m)
     {
-        P[i * m + j] = exp((alpha[i] + beta[j] - M[i * m + j]) / reg);
+        P[i * m + j] = std::exp((alpha[i] + beta[j] - M[i * m + j]) / reg);
     }
 }
 
@@ -326,13 +326,11 @@ void cuda_sinkhorn_bcd(
         optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock, sharedMemory_alpha>>>(
             d_M, d_beta, d_loga, d_alpha, reg, n, m
         );
-        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Optimal beta given alpha
         optimal_beta_kernel<<<numBlocks_beta, threadsPerBlock, sharedMemory_beta>>>(
             d_M, d_alpha, d_logb, d_beta, reg, n, m
         );
-        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Check convergence using dual variable differences -- easier to compute
         if (!use_marginal_error)
@@ -356,7 +354,6 @@ void cuda_sinkhorn_bcd(
             compute_marginal_a_kernel<<<numBlocks_alpha, threadsPerBlock>>>(
                 d_M, d_alpha, d_beta, d_marginal, reg, n, m
             );
-            CUDA_CHECK(cudaDeviceSynchronize());
 
             double marginal_error = compute_l2_distance_cuda(d_marginal, d_a, n);
 
@@ -378,7 +375,6 @@ void cuda_sinkhorn_bcd(
     compute_transport_plan_kernel<<<gridDim, blockDim>>>(
         d_M, d_alpha, d_beta, d_P, reg, n, m
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Copy result back to host
     CUDA_CHECK(cudaMemcpy(P, d_P, n * m * sizeof(double), cudaMemcpyDeviceToHost));

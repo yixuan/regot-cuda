@@ -118,7 +118,6 @@ double compute_l2_distance_cuda(double* d_vec1, double* d_vec2, int size)
     compute_squared_l2_distance_kernel<<<numBlocks, threadsPerBlock>>>(
         d_vec1, d_vec2, d_result, size
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Copy back to host
     double result;
@@ -181,7 +180,6 @@ double compute_l2_norm_cuda(double* d_vec, int size)
     compute_squared_l2_norm_kernel<<<numBlocks, threadsPerBlock>>>(
         d_vec, d_result, size
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Copy back to host
     double result;

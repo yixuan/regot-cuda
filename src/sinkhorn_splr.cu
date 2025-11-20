@@ -244,7 +244,6 @@ public:
 
             // Free log(a) vector
             CUDA_CHECK(cudaFree(d_loga));
-            CUDA_CHECK(cudaDeviceSynchronize());
         }
 
         // Initialize dual variable in previous iteration
@@ -271,7 +270,6 @@ public:
             d_Hvalues, d_Hcolind, d_Hrowptr,
             d_work, d_iwork
         );
-        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Copy d_objfn to host
         CUDA_CHECK(cudaMemcpy(&objfn, d_objfn, sizeof(double), cudaMemcpyDeviceToHost));
@@ -362,7 +360,6 @@ public:
         compute_transport_plan_kernel<<<gridDim, blockDim>>>(
             d_M, d_alpha, d_beta, d_P, m_reg, m_n, m_m
         );
-        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Copy result back to host
         if (P != nullptr)
@@ -373,7 +370,6 @@ public:
         {
             CUDA_CHECK(cudaMemcpy(dual, d_gamma, (m_n + m_m) * sizeof(double), cudaMemcpyDeviceToHost));
         }
-        
     }
 };
 
@@ -443,4 +439,5 @@ void cuda_sinkhorn_splr(
 
     // Compute final transport plan and output results to host
     solver.output_result(P, dual);
+    CUDA_CHECK(cudaDeviceSynchronize());
 }

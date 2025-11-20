@@ -171,8 +171,6 @@ void sparse_cholesky_solve_host(
 
     // Call device function
     sparse_cholesky_solve(d_values, d_colind, d_rowptr, d_rhs, d_x, n, nnz);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
 
     // Copy results back to host
     CUDA_CHECK(cudaMemcpy(x, d_x, n * sizeof(double), cudaMemcpyDeviceToHost));

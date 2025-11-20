@@ -440,8 +440,6 @@ void launch_T_computation(
         d_alpha, d_beta, d_M, reg, n, m,
         d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
 
     // Step 3: Compute objfn and grad
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -451,7 +449,6 @@ void launch_T_computation(
         reg, n, m,
         d_objfn, d_grad
     );
-    // No synchronization here since Step 3 and Step 4 are independent
 
     // Currently we do have a good Top-K implementation,
     // so we directly sort the T values
@@ -468,8 +465,6 @@ void launch_T_computation(
         d_indices_ptr,
         ::cuda::std::greater<double>()
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
 
     // Step 5: Add diagonal elements of Hsl to (values, indices)
     // We no longer need values[K:] and indices[K:], so we overwrite these addresses
@@ -478,8 +473,6 @@ void launch_T_computation(
     write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
         d_Trowsums, d_Tcolsums, shift, n, m, d_values + Ks, d_indices + Ks
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
 
     // Step 6: Call thrust::sort_by_key on the first (K+Hsize) elements to sort indices (ascending order)
     thrust::sort_by_key(
@@ -544,8 +537,6 @@ void launch_csr_conversion(
     extract_columns_and_count_kernel<<<numBlocks, threadsPerBlock>>>(
         d_indices, d_colind, d_row_counts, nnz, Hsize
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
 
     // Compute row pointers using inclusive sum
     // [a, b, c] -> [a, a + b, a + b + c]
@@ -612,8 +603,6 @@ void launch_objfn_grad_sphess(
         d_objfn, d_grad,
         d_Hvalues, d_indices
     );
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
 
     launch_csr_conversion(
         d_indices, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
@@ -974,11 +963,6 @@ void T_computation_sparsify_host(
     launch_csr_conversion(
         d_indices, d_csr_colind, d_csr_rowptr, d_row_counts, Ks, n, m
     );
-
-    // Synchronize
-    // Ensure all ops (kernel + Thrust + CUB) are complete before returning
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaGetLastError());
 
     // Copy results back to host
     CUDA_CHECK(cudaMemcpy(Trowsums, d_Trowsums, n * sizeof(double), cudaMemcpyDeviceToHost));
