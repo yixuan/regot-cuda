@@ -292,7 +292,6 @@ def test_warm_start():
     print(f"  niter: {niter2}")
     print()
 
-    # 第三次运行：使用扰动后的初值
     # Third run: use perturbed initial values
     print("Third run: use perturbed initial values...")
     # Add some noise
@@ -346,7 +345,7 @@ def test_warm_start():
         print(f"✗ Marginal errors are too large (a: {marginal_error_a_1:.2e}, b: {marginal_error_b_1:.2e})")
         success = False
     else:
-        print("✓ Marginal errors are acceptable (a: {marginal_error_a_1:.2e}, b: {marginal_error_b_1:.2e})")
+        print(f"✓ Marginal errors are acceptable (a: {marginal_error_a_1:.2e}, b: {marginal_error_b_1:.2e})")
 
     return success
 
