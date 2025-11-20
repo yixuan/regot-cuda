@@ -42,3 +42,34 @@ void sparse_cholesky_solve_host(
     int n,
     int nnz
 );
+
+class SparseCholeskySolver
+{
+private:
+    // cuDSS data structures
+    cudssHandle_t m_handle;
+    cudssConfig_t m_config;
+    cudssData_t   m_data;
+    cudssMatrix_t m_mat_A;
+    cudssMatrix_t m_vec_b;
+    cudssMatrix_t m_vec_x;
+
+public:
+    SparseCholeskySolver();
+    ~SparseCholeskySolver();
+
+    // Matrix creation
+    void set_A(
+        double* d_values, int* d_colind, int* d_rowptr,
+        int n, size_t nnz
+    );
+    void set_b(double* d_rhs, int n);
+    void set_x(double* d_sol, int n);
+
+    // Symbolic analysis
+    void analyze();
+    // Factorization
+    void factorize();
+    // Solve
+    void solve();
+};

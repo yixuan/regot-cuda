@@ -20,10 +20,89 @@
         } \
     } while (0)
 
-// Define block dimensions (16x16 = 256 threads)
-#define BLOCK_DIM_X 16
-#define BLOCK_DIM_Y 16
-#define BLOCK_DIM 256
+
+
+SparseCholeskySolver::SparseCholeskySolver()
+{
+    // Handle initialization
+    CUDSS_CHECK(cudssCreate(&m_handle));
+
+    // Configuration
+    CUDSS_CHECK(cudssConfigCreate(&m_config));
+    // Use CUDSS_ALG_DEFAULT
+    cudssAlgType_t reorder_alg = CUDSS_ALG_DEFAULT;
+    CUDSS_CHECK(cudssConfigSet(m_config, CUDSS_CONFIG_REORDERING_ALG, (void*)&reorder_alg, sizeof(cudssAlgType_t)));
+
+    // Data object creation
+    CUDSS_CHECK(cudssDataCreate(m_handle, &m_data));
+}
+
+SparseCholeskySolver::~SparseCholeskySolver()
+{
+    // Cleanup
+    CUDSS_CHECK(cudssMatrixDestroy(m_mat_A));
+    CUDSS_CHECK(cudssMatrixDestroy(m_vec_x));
+    CUDSS_CHECK(cudssMatrixDestroy(m_vec_b));
+    CUDSS_CHECK(cudssDataDestroy(m_handle, m_data));
+    CUDSS_CHECK(cudssConfigDestroy(m_config));
+    CUDSS_CHECK(cudssDestroy(m_handle));
+}
+
+void SparseCholeskySolver::set_A(
+    double* d_values, int* d_colind, int* d_rowptr,
+    int n, size_t nnz
+)
+{
+    // CUDSS_MTYPE_SPD for Cholesky decomposition
+    CUDSS_CHECK(cudssMatrixCreateCsr(
+        &m_mat_A, n, n, nnz,
+        d_rowptr, nullptr, d_colind, d_values,
+        CUDA_R_32I, CUDA_R_64F,
+        CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, CUDSS_BASE_ZERO
+    ));
+}
+
+void SparseCholeskySolver::set_b(double* d_rhs, int n)
+{
+    CUDSS_CHECK(cudssMatrixCreateDn(
+        &m_vec_b, n, 1, n,
+        d_rhs,
+        CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
+    ));
+}
+
+void SparseCholeskySolver::set_x(double* d_sol, int n)
+{
+    CUDSS_CHECK(cudssMatrixCreateDn(
+        &m_vec_x, n, 1, n,
+        d_sol,
+        CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
+    ));
+}
+
+void SparseCholeskySolver::analyze()
+{
+    CUDSS_CHECK(cudssExecute(
+        m_handle, CUDSS_PHASE_ANALYSIS, m_config, m_data,
+        m_mat_A, m_vec_x, m_vec_b
+    ));
+}
+
+void SparseCholeskySolver::factorize()
+{
+    CUDSS_CHECK(cudssExecute(
+        m_handle, CUDSS_PHASE_FACTORIZATION, m_config, m_data,
+        m_mat_A, m_vec_x, m_vec_b
+    ));
+}
+
+void SparseCholeskySolver::solve()
+{
+    CUDSS_CHECK(cudssExecute(
+        m_handle, CUDSS_PHASE_SOLVE, m_config, m_data,
+        m_mat_A, m_vec_x, m_vec_b
+    ));
+}
 
 // Sparse Cholesky solver using cuDSS
 // Solves the linear system H * x = rhs where H is a symmetric positive definite matrix
@@ -47,42 +126,20 @@ void sparse_cholesky_solve(
     int nnz
 )
 {
-    // Create cuDSS data structures and handle initialization
-    cudssHandle_t handle;
-    cudssConfig_t config;
-    cudssData_t data;
-    cudssMatrix_t mat_A, vec_b, vec_x;
-    CUDSS_CHECK(cudssCreate(&handle));
+    // Create solver
+    SparseCholeskySolver solver;
 
-    // Configuration
-    CUDSS_CHECK(cudssConfigCreate(&config));
-    // Use CUDSS_ALG_DEFAULT
-    cudssAlgType_t reorder_alg = CUDSS_ALG_DEFAULT;
-    CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG, (void*)&reorder_alg, sizeof(cudssAlgType_t)));
-
-    // Matrix and data object creation
-    CUDSS_CHECK(cudssDataCreate(handle, &data));
-    // CUDSS_MTYPE_SPD for Cholesky decomposition
-    CUDSS_CHECK(cudssMatrixCreateCsr(&mat_A, n, n, nnz, d_rowptr, nullptr, d_colind, d_values, CUDA_R_32I, CUDA_R_64F, CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&vec_b, n, 1, n, d_rhs, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&vec_x, n, 1, n, d_x, CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR));
+    // Matrix creation
+    solver.set_A(d_values, d_colind, d_rowptr, n, nnz);
+    solver.set_b(d_rhs, n);
+    solver.set_x(d_x, n);
 
     // Step 1: Symbolic analysis
-    CUDSS_CHECK(cudssExecute(handle, CUDSS_PHASE_ANALYSIS, config, data, mat_A, vec_x, vec_b));
-
+    solver.analyze();
     // Step 2: Factorization
-    CUDSS_CHECK(cudssExecute(handle, CUDSS_PHASE_FACTORIZATION, config, data, mat_A, vec_x, vec_b));
-
+    solver.factorize();
     // Step 3: Solve
-    CUDSS_CHECK(cudssExecute(handle, CUDSS_PHASE_SOLVE, config, data, mat_A, vec_x, vec_b));
-
-    // Step 4: Cleanup
-    CUDSS_CHECK(cudssMatrixDestroy(mat_A));
-    CUDSS_CHECK(cudssMatrixDestroy(vec_x));
-    CUDSS_CHECK(cudssMatrixDestroy(vec_b));
-    CUDSS_CHECK(cudssDataDestroy(handle, data));
-    CUDSS_CHECK(cudssConfigDestroy(config));
-    CUDSS_CHECK(cudssDestroy(handle));
+    solver.solve();
 }
 
 // Host function, mainly to test sparse Cholesky solver
