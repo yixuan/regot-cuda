@@ -216,10 +216,10 @@ void compute_log_vector_cuda(const double* d_x, double* d_logx, int size)
 {
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
-    // Limit number of blocks to 1024
+    // Limit number of blocks to 256
     // The grid-stride loop in compute_log_vector_kernel()
     // will handle larger sizes
-    numBlocks = std::min(numBlocks, 1024);
+    numBlocks = std::min(numBlocks, 256);
 
     compute_log_vector_kernel<<<numBlocks, threadsPerBlock>>>(
         d_x, d_logx, size
