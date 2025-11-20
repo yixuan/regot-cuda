@@ -20,6 +20,7 @@ def test_csr_conversion():
     # Simple test case
     n, m, K = 6, 3, 10
     reg = 0.1
+    shift = 0.01
 
     # Create test data
     alpha = np.random.normal(scale=0.1, size=n)
@@ -61,7 +62,7 @@ def test_csr_conversion():
     Tsp = np.zeros(n * m)
     Tsp[topk] = T.flatten()[topk]
     Tsp = Tsp.reshape(n, m)
-    Hsl = np.diag(np.concat((Trowsums, Tcolsums[:-1])))
+    Hsl = np.diag(np.concat((Trowsums, Tcolsums[:-1])) + shift)
     Hsl[n:, :n] = Tsp[:, :-1].transpose()
     Hsl_d = Hsl
     Hsl = csr_matrix(Hsl_d)
@@ -73,7 +74,7 @@ def test_csr_conversion():
 
     try:
         # Call the function
-        result = curegot.test_T_computation_sparsify(alpha, beta, M, a, b, reg, K, nrun=1)
+        result = curegot.test_T_computation_sparsify(alpha, beta, M, a, b, reg, shift, K, nrun=1)
 
         print(f"\n=== T Computation Results ===")
         print(f"Total sum: {result['Tsum']:.6f}")

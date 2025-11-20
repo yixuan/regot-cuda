@@ -15,7 +15,7 @@ void cuda_sinkhorn_bcd(
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max, int verbose,
+    double density_max, double shift_max, int verbose,
     const double* x0 = nullptr, double* dual = nullptr
 );
 
@@ -27,7 +27,7 @@ void T_computation_sparsify_host(
     const double* M,
     const double* a,
     const double* b,
-    double reg,
+    double reg, double shift,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
     double* objfn, double* grad,
@@ -195,9 +195,17 @@ py::dict sinkhorn_splr(
     double density_max = 0.01;
     if (kwargs.contains("density"))
     {
-        density_max = py::cast<double>(kwargs["x0"]);
+        density_max = py::cast<double>(kwargs["density"]);
         density_max = std::min(density_max, 1.0);
         density_max = std::max(density_max, 0.0);
+    }
+
+    // Get shift_max from kwargs
+    double shift_max = 0.001;
+    if (kwargs.contains("shift"))
+    {
+        shift_max = py::cast<double>(kwargs["shift"]);
+        shift_max = std::max(shift_max, 0.0);
     }
 
     // Create output arrays
@@ -211,7 +219,12 @@ py::dict sinkhorn_splr(
 
     // Call CUDA function for BCD algorithm
     int niter = 0;
-    cuda_sinkhorn_splr(M_ptr, a_ptr, b_ptr, P_ptr, reg, max_iter, tol, n, m, &niter, density_max, verbose, x0_ptr, dual_ptr);
+    cuda_sinkhorn_splr(
+        M_ptr, a_ptr, b_ptr, P_ptr,
+        reg, max_iter, tol, n, m, &niter,
+        density_max, shift_max, verbose,
+        x0_ptr, dual_ptr
+    );
 
     // Create result dictionary
     py::dict result;
@@ -244,6 +257,7 @@ py::dict test_T_computation_sparsify(
     py::array_t<double> a,
     py::array_t<double> b,
     double reg,
+    double shift,
     int K,
     int nrun
 )
@@ -332,7 +346,7 @@ py::dict test_T_computation_sparsify(
     double Tsum, objfn;
     T_computation_sparsify_host(
         nrun,
-        alpha_ptr, beta_ptr, M_ptr, a_ptr, b_ptr, reg, n, m, Ks,
+        alpha_ptr, beta_ptr, M_ptr, a_ptr, b_ptr, reg, shift, n, m, Ks,
         Trowsums_ptr, Tcolsums_ptr, &Tsum, &objfn, grad_ptr, values_ptr, indices_ptr,
         val_ptr, rowptr_ptr, colind_ptr
     );
@@ -422,7 +436,7 @@ PYBIND11_MODULE(_internal, m)
           "Sinkhorn SPLR algorithm (CUDA implementation)");
 
     m.def("test_T_computation_sparsify", &test_T_computation_sparsify,
-          py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"), py::arg("K"),
+          py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"), py::arg("shift"), py::arg("K"),
           py::arg("nrun") = 1,
           "Test T computation and sparsification (CUDA implementation)");
 

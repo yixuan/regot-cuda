@@ -353,6 +353,7 @@ __global__ void obj_grad_kernel(
 __global__ void write_diagonal_kernel(
     const double* __restrict__ Trowsums, 
     const double* __restrict__ Tcolsums,
+    double shift,
     int n, 
     int m,
     double* __restrict__ values,
@@ -363,15 +364,15 @@ __global__ void write_diagonal_kernel(
     int tid = threadIdx.x;
     int idx = blockIdx.x * blockDim.x + tid;
 
-    // Write Trowsums[0...(n-1)] to values[0...(n-1)]
+    // Write Trowsums[0...(n-1)] + shift to values[0...(n-1)]
     // Write i * (N + 1), i=0, ..., n-1 to indices[0...(n-1)]
     //
-    // Write Tcolsums[0...(m-2)] to (values+n)[0...(m-2)]
+    // Write Tcolsums[0...(m-2)] + shift to (values+n)[0...(m-2)]
     // Write (n + j) * (N + 1), j=0, ..., m-2 to (indices+n)[0...(m-2)]
     int Hsize = n + m - 1;
     if (idx < Hsize)
     {
-        values[idx] = (idx < n) ? (Trowsums[idx]) : (Tcolsums[idx - n]);
+        values[idx] = (idx < n) ? (Trowsums[idx] + shift) : (Tcolsums[idx - n] + shift);
         indices[idx] = idx * (Hsize + 1);
     }
 }
@@ -384,7 +385,7 @@ __global__ void write_diagonal_kernel(
 // 3. Compute objective function value objfn and gradient grad
 // 4. The largest K elements of (T_t)' are stored in the first K elements in d_values
 // 5. The corresponding (flattened) indices are stored in d_indices
-// 6. Add diagonal elements of Hsl matrix to d_values and corresponding indices to d_indices
+// 6. Add diagonal elements of Hsl matrix (plus a shift) to d_values and corresponding indices to d_indices
 //    (overwrite d_values[K:] and d_indices[K:])
 // 7. The first (K+N) elements in d_indices are in ascending order, N = Hsize = n+m-1
 //
@@ -405,7 +406,7 @@ void launch_T_computation(
     const double* d_gamma,
     const double* d_M,
     const double* d_ab,
-    double reg,
+    double reg, double shift,
     int n, int m, int K,
     double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
     double* d_objfn, double* d_grad,
@@ -475,7 +476,7 @@ void launch_T_computation(
     int Hsize = n + m - 1;
     dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
     write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
-        d_Trowsums, d_Tcolsums, n, m, d_values + Ks, d_indices + Ks
+        d_Trowsums, d_Tcolsums, shift, n, m, d_values + Ks, d_indices + Ks
     );
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaGetLastError());
@@ -568,7 +569,7 @@ void launch_csr_conversion(
 }
 
 // Helper function to compute objective function value objfn,
-// gradient grad, and sparsified Hessian in CSR form
+// gradient grad, and sparsified Hessian (plus a shift) in CSR form
 //
 // In: d_gamma     [n+m]  d_gamma = (d_alpha, d_beta)
 // In: d_M         [n*m]
@@ -584,7 +585,7 @@ void launch_objfn_grad_sphess(
     const double* d_gamma,
     const double* d_M,
     const double* d_ab,
-    double reg,
+    double reg, double shift,
     int n, int m, int K,
     double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
@@ -606,7 +607,7 @@ void launch_objfn_grad_sphess(
 
     launch_T_computation(
         d_gamma, d_M, d_ab,
-        reg, n, m, Ks,
+        reg, shift, n, m, Ks,
         d_Trowsums, d_Tcolsums, d_Tsum,
         d_objfn, d_grad,
         d_Hvalues, d_indices
@@ -751,7 +752,7 @@ void T_computation_sparsify_host(
     const double* M,
     const double* a,
     const double* b,
-    double reg,
+    double reg, double shift,
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
     double* objfn, double* grad,
@@ -816,7 +817,7 @@ void T_computation_sparsify_host(
     {
         launch_T_computation(
             d_gamma, d_M, d_ab,
-            reg, n, m, Ks,
+            reg, shift, n, m, Ks,
             d_Trowsums, d_Tcolsums, d_Tsum,
             d_objfn, d_grad,
             d_values, d_indices

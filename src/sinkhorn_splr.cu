@@ -52,7 +52,7 @@ void launch_objfn_grad_sphess(
     const double* d_gamma,
     const double* d_M,
     const double* d_ab,
-    double reg,
+    double reg, double shift,
     int n, int m, int K,
     double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
@@ -205,7 +205,7 @@ public:
     }
 
     // Compute objective function value, gradient, and sparsified Hessian
-    size_t dual_objfn_grad_sphess(double density, double& objfn)
+    size_t dual_objfn_grad_sphess(double density, double shift, double& objfn)
     {
         // Make sure density is within (0, 1)
         density = std::min(density, 1.0);
@@ -219,7 +219,7 @@ public:
         // launch computation
         launch_objfn_grad_sphess(
             d_gamma, d_M, d_ab,
-            m_reg, m_n, m_m, K,
+            m_reg, shift, m_n, m_m, K,
             d_objfn, d_grad,
             d_Hvalues, d_Hcolind, d_Hrowptr,
             d_work, d_iwork
@@ -305,7 +305,7 @@ public:
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max, int verbose,
+    double density_max, double shift_max, int verbose,
     const double* x0 = nullptr, double* dual = nullptr
 )
 {
@@ -314,6 +314,9 @@ void cuda_sinkhorn_splr(
     density_max = std::max(density_max, 0.0);
     const double density_min = 0.01 * density_max;
     double density = 0.1 * density_max;
+
+    double shift = shift_max;
+
     size_t Kmax = static_cast<size_t>(density_max * n * (m - 1));
     Kmax = std::max(Kmax, size_t(1));
 
@@ -325,7 +328,7 @@ void cuda_sinkhorn_splr(
 
     // Initial objective function value, gradient, and sparsified Hessian
     double objfn;
-    size_t nnz = solver.dual_objfn_grad_sphess(density, objfn);
+    size_t nnz = solver.dual_objfn_grad_sphess(density, shift, objfn);
     double gnorm = solver.grad_norm();
     double gnorm_init = gnorm;
 
