@@ -5,8 +5,17 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+// Thrust headers
+#include <thrust/device_vector.h>
+#include <thrust/transform.h>
+#include <thrust/functional.h>
+#include <thrust/iterator/constant_iterator.h>
+
 // Utility functions
 #include "utils.h"
+
+// Linear solver
+#include "linsolve.h"
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -110,6 +119,8 @@ private:
     // Working space
     double*      d_work;
     int*         d_iwork;
+    // Sparse Cholesky solver
+    SparseCholeskySolver m_linsolver;
 
 public:
     // Constructor
@@ -144,6 +155,27 @@ public:
 
         // Set d_grad_prev to zero
         CUDA_CHECK(cudaMemset(d_grad_prev, 0, m_Hsize * sizeof(double)));
+    }
+
+    // Destructor
+    ~SPLRSolver()
+    {
+        // Free device memory
+        CUDA_CHECK(cudaFree(d_M));
+        CUDA_CHECK(cudaFree(d_ab));
+        CUDA_CHECK(cudaFree(d_gamma));
+        CUDA_CHECK(cudaFree(d_gamma_prev));
+        CUDA_CHECK(cudaFree(d_objfn));
+        CUDA_CHECK(cudaFree(d_grad));
+        CUDA_CHECK(cudaFree(d_grad_prev));
+        CUDA_CHECK(cudaFree(d_direc));
+        CUDA_CHECK(cudaFree(d_y));
+        CUDA_CHECK(cudaFree(d_s));
+        CUDA_CHECK(cudaFree(d_Hvalues));
+        CUDA_CHECK(cudaFree(d_Hcolind));
+        CUDA_CHECK(cudaFree(d_Hrowptr));
+        CUDA_CHECK(cudaFree(d_work));
+        CUDA_CHECK(cudaFree(d_iwork));
     }
 
     // Initialize dual variables
@@ -234,6 +266,12 @@ public:
         return nnz;
     }
 
+    // Get current gradient norm
+    double grad_norm() const
+    {
+        return compute_l2_norm_cuda(d_grad, m_Hsize);
+    }
+
     // Compute low-rank vectors
     void compute_low_rank(double& ys, double& yy)
     {
@@ -244,10 +282,32 @@ public:
         launch_low_rank(d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, ys, yy, m_Hsize);
     }
 
-    // Get current gradient norm
-    double grad_norm() const
+    // Compute search direction
+    void compute_search_direc(size_t nnz, bool analyze_pattern = true)
     {
-        return compute_l2_norm_cuda(d_grad, m_Hsize);
+        // Solve H * d = -g
+        // Note that we have actually stored reg*H,
+        // so we first solve d = inv(H) * g, and then do
+        // the scaling d <- -reg * d
+        m_linsolver.set_A(d_Hvalues, d_Hcolind, d_Hrowptr, m_Hsize, nnz);
+        m_linsolver.set_b(d_grad, m_Hsize);
+        m_linsolver.set_x(d_direc, m_Hsize);
+        if (analyze_pattern)
+        {
+            m_linsolver.analyze();
+        }
+        m_linsolver.factorize();
+        m_linsolver.solve();
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaGetLastError());
+
+        // Scaling d <- -reg * d
+        thrust::constant_iterator<double> constant_iter(-m_reg);
+        thrust::device_ptr<double> d_direc_ptr = thrust::device_pointer_cast(d_direc);
+        thrust::transform(
+            d_direc_ptr, d_direc_ptr + m_Hsize, constant_iter, d_direc_ptr,
+            thrust::multiplies<double>()
+        );
     }
 
     // Output results to host -- transport plan and dual variables
@@ -276,27 +336,6 @@ public:
             CUDA_CHECK(cudaMemcpy(dual, d_gamma, (m_n + m_m) * sizeof(double), cudaMemcpyDeviceToHost));
         }
         
-    }
-
-    // Destructor
-    ~SPLRSolver()
-    {
-        // Free device memory
-        CUDA_CHECK(cudaFree(d_M));
-        CUDA_CHECK(cudaFree(d_ab));
-        CUDA_CHECK(cudaFree(d_gamma));
-        CUDA_CHECK(cudaFree(d_gamma_prev));
-        CUDA_CHECK(cudaFree(d_objfn));
-        CUDA_CHECK(cudaFree(d_grad));
-        CUDA_CHECK(cudaFree(d_grad_prev));
-        CUDA_CHECK(cudaFree(d_direc));
-        CUDA_CHECK(cudaFree(d_y));
-        CUDA_CHECK(cudaFree(d_s));
-        CUDA_CHECK(cudaFree(d_Hvalues));
-        CUDA_CHECK(cudaFree(d_Hcolind));
-        CUDA_CHECK(cudaFree(d_Hrowptr));
-        CUDA_CHECK(cudaFree(d_work));
-        CUDA_CHECK(cudaFree(d_iwork));
     }
 };
 
@@ -365,7 +404,7 @@ void cuda_sinkhorn_splr(
         }
         else
         {
-            // lin_sol.solve(direc, H, -g, shift);
+            solver.compute_search_direc(nnz, true);
         }
 
         *niter = iter + 1;
