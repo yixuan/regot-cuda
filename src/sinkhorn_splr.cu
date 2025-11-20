@@ -59,6 +59,20 @@ void launch_objfn_grad_sphess(
     double* d_work, int* d_iwork
 );
 
+// Helper function to compute low-rank vectors y and s
+// From sinkhorn_splr_kernel.cu
+void launch_low_rank(
+    const double* d_grad,
+    const double* d_grad_prev,
+    const double* d_gamma,
+    const double* d_gamma_prev,
+    double* d_y,
+    double* d_s,
+    double& ys,
+    double& yy,
+    int size
+);
+
 // Class for the SPLR solver
 class SPLRSolver
 {
@@ -220,6 +234,16 @@ public:
         return nnz;
     }
 
+    // Compute low-rank vectors
+    void compute_low_rank(double& ys, double& yy)
+    {
+        // y = grad - grad_prev
+        // s = gamma - gamma_prev
+        // ys = y's
+        // yy = y'y
+        launch_low_rank(d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, ys, yy, m_Hsize);
+    }
+
     // Get current gradient norm
     double grad_norm() const
     {
@@ -314,6 +338,31 @@ void cuda_sinkhorn_splr(
         {
             std::cout << "iter = " << iter << ", objval = " << objfn <<
                 ", ||grad|| = " << gnorm << std::endl;
+        }
+
+        // Convergence test
+        // Also exit if objective function value is not finite
+        if ((gnorm < tol) || (!std::isfinite(objfn)))
+            break;
+
+        // Compute y = grad - grad_prev and s = gamma - gamma_prev
+        // ys = y's, yy = y'y
+        double ys, yy;
+        solver.compute_low_rank(ys, yy);
+
+        // Compute search direction
+        // We do not do low-rank update in the first iteration
+        // When <y, s> is too small, don't use low-rank update
+        constexpr double eps = 1e-6;  // Or use std::numeric_limits<double>::epsilon();
+        const bool low_rank = (iter > 0) && (ys > (eps * yy));
+        // const double shift = std::min(gnorm, shift_max);
+        if (low_rank)
+        {
+            // lin_sol.solve_low_rank(direc, H, -g, shift, y, s);
+        }
+        else
+        {
+            // lin_sol.solve(direc, H, -g, shift);
         }
 
         *niter = iter + 1;

@@ -231,6 +231,56 @@ __global__ void T_fused_kernel(
 // In: Tsum      [1]
 // Out: objfn    [1]
 // Out: grad     [n+m-1]
+
+// Helper function: intra-warp reduction
+__device__ __forceinline__ double warp_reduce_sum(double val)
+{
+    const unsigned int mask = 0xffffffff;
+    for (int s = warpSize / 2; s > 0; s >>= 1)
+    {
+        val += __shfl_down_sync(mask, val, s);
+    }
+    return val;
+}
+
+// Helper function: intra-block reduction
+// Input: local sum in the current thread
+// Output: when threadIdx.x == 0, return the block sum
+// Do not call this function for other threads
+__device__ __forceinline__ double block_reduce_sum(double val)
+{
+    // Reduction within the warp
+    double sum = warp_reduce_sum(val);
+
+    // Use shared memory for intra-block reduction
+    // Assuming max blockDim.x is 1024 and warpSize is 32, max 32 slots are needed
+    static __shared__ double shared[32];
+    int lane = threadIdx.x % warpSize;
+    int warp_id = threadIdx.x / warpSize;
+
+    // These threads (lane == 0) contain the warp sums
+    if (lane == 0)
+    {
+        // shared[0]: warp 0 sum
+        // shared[1]: warp 1 sum
+        // ...
+        shared[warp_id] = sum;
+    }
+    __syncthreads();
+
+    // Let the first warp aggregate results from all warps
+    // Only warp 0 does this
+    // This time results are stored in shared memory
+    if (warp_id == 0)
+    {
+        // (blockDim.x + warpSize - 1) / warpSize means how many warps are actually used
+        sum = (lane < (blockDim.x + warpSize - 1) / warpSize) ? shared[lane] : 0.0;
+        sum = warp_reduce_sum(sum);
+    }
+
+    return sum;
+}
+
 __global__ void obj_grad_kernel(
     const double* __restrict__ ab,
     const double* __restrict__ gamma,
@@ -280,47 +330,13 @@ __global__ void obj_grad_kernel(
     }
 
     // Parallel reduction to calculate the dot product
-    // Use warp shuffle for intra-warp reduction
-    unsigned int mask = 0xffffffff;
-    for (int s = warpSize / 2; s > 0; s >>= 1)
+    local_dotprod = block_reduce_sum(local_dotprod);
+
+    // Atomically accumulate block results to global objfn
+    if (tid == 0)
     {
-        local_dotprod += __shfl_down_sync(mask, local_dotprod, s);
-    }
-
-    // Use shared memory for intra-block reduction
-    // Assuming max blockDim.x is 1024 and warpSize is 32, max 32 slots are needed
-    static __shared__ double shared_sums[32];
-    int lane = tid % warpSize;
-    int warp_id = tid / warpSize;
-
-    if (lane == 0)
-    {
-        shared_sums[warp_id] = local_dotprod;
-    }
-    __syncthreads();
-
-    // Let the first warp aggregate results from all Warps
-    // Only warp 0 does this
-    if (warp_id == 0)
-    {
-        double block_sum = 0.0;
-        // Only read the actual number of existing warps
-        if (lane < (blockDim.x + warpSize - 1) / warpSize)
-        {
-            block_sum = shared_sums[lane];
-        }
-        
-        // Use warp shuffle reduction again
-        for (int s = warpSize / 2; s > 0; s >>= 1) {
-            block_sum += __shfl_down_sync(mask, block_sum, s);
-        }
-
-        // Atomically accumulate block results to global objfn
-        if (lane == 0)
-        {
-            // Let objfn hold -<gamma, ab>
-            atomicAdd(objfn, -block_sum);
-        }
+        // Let objfn hold -<gamma, ab>
+        atomicAdd(objfn, -local_dotprod);
     }
 
     // Handle constant term reg * Tsum
@@ -604,6 +620,130 @@ void launch_objfn_grad_sphess(
     launch_csr_conversion(
         d_indices, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
     );
+}
+
+// CUDA kernel to compute low-rank vectors y and s
+// y = grad - grad_prev
+// s = gamma - gamma_prev
+// ys = y's
+// yy = y'y
+//
+// In: grad        [Hsize=n+m-1]
+// In: grad_prev   [Hsize]
+// In: gamma       [Hsize]
+// In: gamma_prev  [Hsize]
+// Out: y          [Hsize]
+// Out: s          [Hsize]
+// Out: ys         [1]
+// Out: yy         [1]
+__global__ void low_rank_fused_kernel(
+    const double* __restrict__ grad,
+    const double* __restrict__ grad_prev,
+    const double* __restrict__ gamma,
+    const double* __restrict__ gamma_prev,
+    double* __restrict__ y,
+    double* __restrict__ s,
+    double* __restrict__ ys,
+    double* __restrict__ yy,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    // Local accumulators
+    double local_ys = 0.0;
+    double local_yy = 0.0;
+
+    // Grid-stride loop
+    for (int i = idx; i < size; i += stride)
+    {
+        // Load
+        double g = grad[i];
+        double gp = grad_prev[i];
+        double gam = gamma[i];
+        double gamp = gamma_prev[i];
+
+        // Compute
+        double yval = g - gp;
+        double sval = gam - gamp;
+
+        // Store
+        y[i] = yval;
+        s[i] = sval;
+
+        // Accumulate
+        local_ys += yval * sval;
+        local_yy += yval * yval;
+    }
+
+    // Parallel reduction
+    local_ys = block_reduce_sum(local_ys);
+    // block_reduce_sum contains a __syncthreads(),
+    // so it is safe to call sequentially
+    local_yy = block_reduce_sum(local_yy);
+
+    // Write to global memory
+    // Only one thread needs to do this once
+    if (tid == 0)
+    {
+        atomicAdd(ys, local_ys);
+        atomicAdd(yy, local_yy);
+    } 
+}
+
+// Helper function to compute low-rank vectors y and s
+//
+// In: d_grad        [Hsize=n+m-1]
+// In: d_grad_prev   [Hsize]
+// In: d_gamma       [Hsize]
+// In: d_gamma_prev  [Hsize]
+// Out: d_y          [Hsize]
+// Out: d_s          [Hsize]
+// Out: ys (host)    [1]
+// Out: yy (host)    [1]
+void launch_low_rank(
+    const double* d_grad,
+    const double* d_grad_prev,
+    const double* d_gamma,
+    const double* d_gamma_prev,
+    double* d_y,
+    double* d_s,
+    double& ys,
+    double& yy,
+    int size
+)
+{
+    // Allocate device memory for scalars
+    double* d_ys;
+    double* d_yy;
+    CUDA_CHECK(cudaMalloc(&d_ys, sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_yy, sizeof(double)));
+
+    // Initialize to zero
+    CUDA_CHECK(cudaMemset(d_ys, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_yy, 0, sizeof(double)));
+
+    // Call kernel function
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in low_rank_fused_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+    low_rank_fused_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, d_ys, d_yy, size
+    );
+
+    // Copy results to host
+    CUDA_CHECK(cudaMemcpy(&ys, d_ys, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&yy, d_yy, sizeof(double), cudaMemcpyDeviceToHost));
+
+    // Free device memory
+    CUDA_CHECK(cudaFree(d_ys));
+    CUDA_CHECK(cudaFree(d_yy));
 }
 
 // Sparse Cholesky solver using cuDSS
