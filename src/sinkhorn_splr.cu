@@ -82,6 +82,18 @@ void launch_low_rank(
     int size
 );
 
+// Helper function to compute search direction with low-rank terms
+// From sinkhorn_splr_kernel.cu
+void launch_low_rank_search_direc(
+    double* d_direc,
+    const double* d_invA_y,
+    const double* d_g,
+    const double* d_y,
+    const double* d_s,
+    const double ys,
+    int size
+);
+
 // Class for the SPLR solver
 class SPLRSolver
 {
@@ -112,6 +124,7 @@ private:
     double*      d_direc;
     double*      d_y;
     double*      d_s;
+    double*      d_invA_y;
     // Sparsified Hessian in CSR representation
     double*      d_Hvalues;
     int*         d_Hcolind;
@@ -138,6 +151,7 @@ public:
         CUDA_CHECK(cudaMalloc(&d_direc, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_y, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_s, m_Hsize * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_invA_y, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_Hvalues, (m_Te + m_Hsize) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_Hcolind, (Kmax + m_Hsize) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_Hrowptr, (m_Hsize + 1) * sizeof(int)));
@@ -171,6 +185,7 @@ public:
         CUDA_CHECK(cudaFree(d_direc));
         CUDA_CHECK(cudaFree(d_y));
         CUDA_CHECK(cudaFree(d_s));
+        CUDA_CHECK(cudaFree(d_invA_y));
         CUDA_CHECK(cudaFree(d_Hvalues));
         CUDA_CHECK(cudaFree(d_Hcolind));
         CUDA_CHECK(cudaFree(d_Hrowptr));
@@ -282,13 +297,23 @@ public:
         launch_low_rank(d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, ys, yy, m_Hsize);
     }
 
-    // Compute search direction
-    void compute_search_direc(size_t nnz, bool analyze_pattern = true)
+    // Compute search direction (with low-rank term)
+    void compute_search_direc(size_t nnz, double ys, bool low_rank = true, bool analyze_pattern = true)
     {
-        // Solve H * d = -g
-        // Note that we have actually stored reg*H,
-        // so we first solve d = inv(H) * g, and then do
-        // the scaling d <- -reg * d
+        // Solve (H + UCV) * d = -g
+        // U = [u, v], C = diag(a, b), V = U'
+        // u = y, v = A * s
+        // a = 1 / u's, b = -1 / v's
+
+        // Note that we have actually stored A = reg * H,
+        // so we first solve (A + UDV) * x = g,
+        // where D = diag(reg * a, reg * b), and then do
+        // the scaling d <- -reg * x
+
+        // BFGS update rule
+        // https://en.wikipedia.org/wiki/Broyden%E2%80%93Fletcher%E2%80%93Goldfarb%E2%80%93Shanno_algorithm
+        
+        // direc = invA_g = inv(A) * g;
         m_linsolver.set_A(d_Hvalues, d_Hcolind, d_Hrowptr, m_Hsize, nnz);
         m_linsolver.set_b(d_grad, m_Hsize);
         m_linsolver.set_x(d_direc, m_Hsize);
@@ -298,10 +323,23 @@ public:
         }
         m_linsolver.factorize();
         m_linsolver.solve();
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaGetLastError());
 
-        // Scaling d <- -reg * d
+        if (low_rank)
+        {
+            // invA_y = inv(A) * y;
+            m_linsolver.set_b(d_y, m_Hsize);
+            m_linsolver.set_x(d_invA_y, m_Hsize);
+            m_linsolver.solve();
+
+            // BFGS rule
+            // sg = s'g, ys = y's
+            // yinvAy = y'(invA_y), yinvAg = y'(invA_g) = y'(direc)
+            // sg_ys = sg / ys
+            // direc += ((1 + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
+            launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_Hsize);
+        }
+
+        // Scaling d <- -reg * x
         thrust::constant_iterator<double> constant_iter(-m_reg);
         thrust::device_ptr<double> d_direc_ptr = thrust::device_pointer_cast(d_direc);
         thrust::transform(
@@ -398,14 +436,7 @@ void cuda_sinkhorn_splr(
         constexpr double eps = 1e-6;  // Or use std::numeric_limits<double>::epsilon();
         const bool low_rank = (iter > 0) && (ys > (eps * yy));
         // const double shift = std::min(gnorm, shift_max);
-        if (low_rank)
-        {
-            // lin_sol.solve_low_rank(direc, H, -g, shift, y, s);
-        }
-        else
-        {
-            solver.compute_search_direc(nnz, true);
-        }
+        solver.compute_search_direc(nnz, ys, low_rank, true);
 
         *niter = iter + 1;
     }

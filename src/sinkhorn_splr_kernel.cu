@@ -744,6 +744,150 @@ void launch_low_rank(
     CUDA_CHECK(cudaFree(d_yy));
 }
 
+// CUDA kernels to compute search direction with low-rank terms
+__global__ void search_direc_dot_kernel(
+    const double* __restrict__ s,
+    const double* __restrict__ g,
+    const double* __restrict__ y,
+    const double* __restrict__ invA_y,
+    const double* __restrict__ invA_g,
+    double* __restrict__ d_scalars,  // sg, yinvAy, yinvAg
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    // Local accumulators
+    double local_sg = 0.0;
+    double local_yinvAy = 0.0;
+    double local_yinvAg = 0.0;
+
+    // Grid-stride loop
+    for (int i = idx; i < size; i += stride)
+    {
+        double yval = y[i];
+        local_sg += s[i] * g[i];
+        local_yinvAy += yval * invA_y[i];
+        local_yinvAg += yval * invA_g[i];
+    }
+
+    // Parallel reduction
+    local_sg = block_reduce_sum(local_sg);
+    local_yinvAy = block_reduce_sum(local_yinvAy);
+    local_yinvAg = block_reduce_sum(local_yinvAg);
+
+    // Write to global memory
+    // Only one thread needs to do this once
+    if (tid == 0)
+    {
+        atomicAdd(&d_scalars[0], local_sg);
+        atomicAdd(&d_scalars[1], local_yinvAy);
+        atomicAdd(&d_scalars[2], local_yinvAg);
+    }
+}
+
+__global__ void update_direc_kernel(
+    double* __restrict__ direc,
+    const double* __restrict__ invA_y,
+    const double* __restrict__ s,
+    const double* __restrict__ d_scalars,  // sg, yinvAy, yinvAg
+    double ys,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    // Only the first thread computes common values
+    // Use shared memory broadcast to avoid reading global memory by every thread
+    __shared__ double common_term1;
+    __shared__ double common_term2;
+
+    if (tid == 0)
+    {
+        double sg = d_scalars[0];
+        double yinvAy = d_scalars[1];
+        double yinvAg = d_scalars[2];
+        double sg_ys = sg / ys;
+
+        // direc += term1 * s - term2 * invA_y
+        // term1 = (1 + yinvAy / ys) * sg_ys - yinvAg / ys
+        // term2 = sg_ys
+        double term1 = (1.0 + yinvAy / ys) * sg_ys - yinvAg / ys;
+        
+        common_term1 = term1;
+        common_term2 = sg_ys;
+    }
+    // Wait for computing common values
+    __syncthreads();
+
+    // Grid-stride Loop
+    double t1 = common_term1;
+    double t2 = common_term2;
+    // direc += t1 * s - t2 * invA_y
+    for (int i = idx; i < size; i += stride)
+    {
+        direc[i] += t1 * s[i] - t2 * invA_y[i];
+    }
+}
+
+// Helper function to compute search direction with low-rank terms
+//
+// 1. sg = sum(s * g)
+// 2. yinvAy = sum(y * invA_y)
+// 3. yinvAg = sum(y * invA_g), invA_g is an alias of direc
+// 4. sg_ys = sg / ys
+// 5. direc += ((1 + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
+//
+// In/Out: d_direc  [size]
+// In: d_invA_y     [size]
+// In: d_g          [size]
+// In: d_y          [size]
+// In: d_s          [size]
+void launch_low_rank_search_direc(
+    double* d_direc,
+    const double* d_invA_y,
+    const double* d_g,
+    const double* d_y,
+    const double* d_s,
+    const double ys,
+    int size
+)
+{
+    // Allocate workspace
+    double* d_work;
+    CUDA_CHECK(cudaMalloc(&d_work, 3 * sizeof(double)));
+
+    // Initialize to zero
+    CUDA_CHECK(cudaMemset(d_work, 0, 3 * sizeof(double)));
+
+    // Call first kernel function
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in search_direc_dot_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+    search_direc_dot_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_s, d_g, d_y, d_invA_y, d_direc, 
+        d_work, size
+    );
+
+    // Call second kernel function
+    update_direc_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_direc, d_invA_y, d_s, 
+        d_work, ys, size
+    );
+
+    // Free workspace
+    CUDA_CHECK(cudaFree(d_work));
+}
+
 // Host function, mainly to test T computation and CSR conversion
 void T_computation_sparsify_host(
     int nrun,
