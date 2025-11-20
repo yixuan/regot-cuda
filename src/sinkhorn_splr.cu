@@ -84,8 +84,11 @@ private:
     // Objective function value and gradient
     double*      d_objfn;
     double*      d_grad;
-    // Search direction
+    double*      d_grad_prev;
+    // Search direction and low-rank vectors
     double*      d_direc;
+    double*      d_y;
+    double*      d_s;
     // Sparsified Hessian in CSR representation
     double*      d_Hvalues;
     int*         d_Hcolind;
@@ -106,7 +109,10 @@ public:
         CUDA_CHECK(cudaMalloc(&d_gamma_prev, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_grad, m_Hsize * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_grad_prev, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_direc, m_Hsize * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_y, m_Hsize * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_s, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_Hvalues, (m_Te + m_Hsize) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_Hcolind, (Kmax + m_Hsize) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_Hrowptr, (m_Hsize + 1) * sizeof(int)));
@@ -121,6 +127,9 @@ public:
         CUDA_CHECK(cudaMemcpy(d_M, M, m_Me * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_ab, a, m_n * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_ab + m_n, b, m_m * sizeof(double), cudaMemcpyHostToDevice));
+
+        // Set d_grad_prev to zero
+        CUDA_CHECK(cudaMemset(d_grad_prev, 0, m_Hsize * sizeof(double)));
     }
 
     // Initialize dual variables
@@ -182,7 +191,7 @@ public:
     }
 
     // Compute objective function value, gradient, and sparsified Hessian
-    size_t dual_objfn_grad_sphess(double density)
+    size_t dual_objfn_grad_sphess(double density, double& objfn)
     {
         // Make sure density is within (0, 1)
         density = std::min(density, 1.0);
@@ -202,6 +211,9 @@ public:
             d_work, d_iwork
         );
         CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Copy d_objfn to host
+        CUDA_CHECK(cudaMemcpy(&objfn, d_objfn, sizeof(double), cudaMemcpyDeviceToHost));
 
         // Return number of nonzeros in sparsified Hessian
         size_t nnz = K + m_Hsize;
@@ -252,7 +264,10 @@ public:
         CUDA_CHECK(cudaFree(d_gamma_prev));
         CUDA_CHECK(cudaFree(d_objfn));
         CUDA_CHECK(cudaFree(d_grad));
+        CUDA_CHECK(cudaFree(d_grad_prev));
         CUDA_CHECK(cudaFree(d_direc));
+        CUDA_CHECK(cudaFree(d_y));
+        CUDA_CHECK(cudaFree(d_s));
         CUDA_CHECK(cudaFree(d_Hvalues));
         CUDA_CHECK(cudaFree(d_Hcolind));
         CUDA_CHECK(cudaFree(d_Hrowptr));
@@ -266,7 +281,7 @@ public:
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max,
+    double density_max, int verbose,
     const double* x0 = nullptr, double* dual = nullptr
 )
 {
@@ -285,12 +300,22 @@ void cuda_sinkhorn_splr(
     solver.init_dual(x0);
 
     // Initial objective function value, gradient, and sparsified Hessian
-    size_t nnz = solver.dual_objfn_grad_sphess(density);
+    double objfn;
+    size_t nnz = solver.dual_objfn_grad_sphess(density, objfn);
     double gnorm = solver.grad_norm();
+    double gnorm_init = gnorm;
 
     // Main iteration
+    // Initial step size
+    double alpha = 1.0;
     for (int iter = 0; iter < max_iter; iter++)
     {
+        if (verbose >= 1)
+        {
+            std::cout << "iter = " << iter << ", objval = " << objfn <<
+                ", ||grad|| = " << gnorm << std::endl;
+        }
+
         *niter = iter + 1;
     }
 

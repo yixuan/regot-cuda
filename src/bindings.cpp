@@ -7,13 +7,13 @@
 void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    const double* x0, double* dual
+    const double* x0 = nullptr, double* dual = nullptr
 );
 
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max,
+    double density_max, int verbose,
     const double* x0 = nullptr, double* dual = nullptr
 );
 
@@ -219,7 +219,7 @@ py::dict sinkhorn_splr(
 
     // Call CUDA function for BCD algorithm
     int niter = 0;
-    cuda_sinkhorn_splr(M_ptr, a_ptr, b_ptr, P_ptr, reg, max_iter, tol, n, m, &niter, density_max, x0_ptr, dual_ptr);
+    cuda_sinkhorn_splr(M_ptr, a_ptr, b_ptr, P_ptr, reg, max_iter, tol, n, m, &niter, density_max, verbose, x0_ptr, dual_ptr);
 
     // Create result dictionary
     py::dict result;
