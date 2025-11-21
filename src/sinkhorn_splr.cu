@@ -449,7 +449,6 @@ public:
         dual_objfn_grad_sphess(0.01, 0.001, fx, true, false);
         // Get g'(direc)
         dg = dot(d_grad, d_direc, m_Hsize);
-        std::cout << "fx = " << fx << std::endl;
 
         // Convergence test
         if (fx <= fx_init + step * test_decr && abs(dg) <= test_curv)
@@ -539,7 +538,6 @@ public:
             axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
             dual_objfn_grad_sphess(0.01, 0.001, fx, true, false);
             dg = dot(d_grad, d_direc, m_Hsize);
-            std::cout << "fx = " << fx << std::endl;
 
             // Convergence test
             if (fx <= fx_init + step * test_decr && abs(dg) <= test_curv)
@@ -596,6 +594,12 @@ public:
         return step;
     }
 
+    // Update iterate, d_gamma = d_gamma_prev + alpha * d_direc
+    void update_gamma(double alpha)
+    {
+        axpy(d_direc, d_gamma_prev, alpha, m_Hsize, d_gamma);
+    }
+
     // Output results to host -- transport plan and dual variables
     void output_result(double* P, double* dual)
     {
@@ -649,11 +653,17 @@ void cuda_sinkhorn_splr(
     // Initialize dual variables
     solver.init_dual(x0);
 
-    // Initial objective function value, gradient, and sparsified Hessian
+    // Initial objective function value (f), gradient (g),
+    // and sparsified Hessian (sphess)
     double objfn;
-    size_t nnz = solver.dual_objfn_grad_sphess(density, shift, objfn);
+    // Only compute f and g by setting stage1 = true, stage2 = false
+    solver.dual_objfn_grad_sphess(density, shift, objfn, true, false);
+    // Now we can compute ||grad||, which will be used for updating shift
     double gnorm = solver.grad_norm();
     double gnorm_init = gnorm;
+    shift = std::min(gnorm, shift_max);
+    // Then continue computing sphess by setting stage1 = false, stage2 = true
+    size_t nnz = solver.dual_objfn_grad_sphess(density, shift, objfn, false, true);
 
     // Main iteration
     // Initial step size
@@ -681,7 +691,6 @@ void cuda_sinkhorn_splr(
         // When <y, s> is too small, don't use low-rank update
         constexpr double eps = 1e-6;  // Or use std::numeric_limits<double>::epsilon();
         const bool low_rank = (iter > 0) && (ys > (eps * yy));
-        // const double shift = std::min(gnorm, shift_max);
         solver.compute_search_direc(nnz, ys, low_rank, true);
 
         // Line search will overwrite d_gamma and d_grad, so
@@ -689,10 +698,35 @@ void cuda_sinkhorn_splr(
         solver.save_history();
 
         // Wolfe Line Search
+        // Will overwrite d_gamma and d_grad
+        // If the updated recompute_fg is false, then the overwritten d_gamma
+        // is the new point, and d_objfn and d_grad contain the corresponding
+        // objective function value and gradient, respectively
+        // Otherwise, we need to recompute d_gamma, d_objfn, and d_grad
         bool recompute_fg = true;
         alpha = solver.line_search_wolfe(
             std::min(1.0, 1.5 * alpha), objfn, recompute_fg
         );
+
+        // Recompute the new point if needed
+        if (recompute_fg)
+        {
+            // d_gamma = d_gamma_prev + alpha * direc
+            solver.update_gamma(alpha);
+            // Compute f and g on new point d_gamma
+            solver.dual_objfn_grad_sphess(density, shift, objfn, true, false);
+        }
+
+        // Adjust density according to gnorm change
+        const double gnorm_pre = gnorm;
+        gnorm = solver.grad_norm();
+        const bool bad_move = (gnorm_pre < gnorm_init) && (gnorm > gnorm_pre);
+        density *= (bad_move ? 1.1 : 0.99);
+        density = std::min(density_max, std::max(density_min, density));
+        
+        // Compute sphess
+        shift = std::min(gnorm, shift_max);
+        nnz = solver.dual_objfn_grad_sphess(density, shift, objfn, false, true);
 
         *niter = iter + 1;
     }
