@@ -566,34 +566,33 @@ public:
                     return step;
                 }
             }
-
-            // If we have used up all line search iterations, then the strong Wolfe condition
-            // is not met. We choose not to raise an exception (unless no step satisfying
-            // sufficient decrease is found), but to return the best step size so far
-            if (iter >= max_iter - 1)
-            {
-                // First test whether the last step is better than I_lo
-                // If yes, return the last step
-                const double ft = fx - fx_init - step * test_decr;
-                if (ft <= fI_lo)
-                    return step;
-
-                // If not, then the best step size so far is I_lo, but it needs to be positive
-                if (I_lo <= 0.0)
-                {
-                    recompute_fg = true;
-                    return init_step;
-                }
-
-                // Return everything with _lo
-                recompute_fg = true;
-                step = I_lo;
-                fx = fx_lo;
-                dg = dg_lo;
-                return step;
-            }
         }
 
+        // When we reach here, it means that the maximum number of iterations
+        // have been attained
+        // If we have used up all line search iterations, then the
+        // strong Wolfe condition is not met
+        // We choose not to raise an exception (unless no step satisfying
+        // sufficient decrease is found), but to return the best step size so far
+        //
+        // First test whether the last step is better than I_lo
+        // If yes, return the last step
+        const double ft = fx - fx_init - step * test_decr;
+        if (ft <= fI_lo)
+            return step;
+
+        // If not, then the best step size so far is I_lo, but it needs to be positive
+        if (I_lo <= 0.0)
+        {
+            recompute_fg = true;
+            return init_step;
+        }
+
+        // Return everything with _lo
+        recompute_fg = true;
+        step = I_lo;
+        fx = fx_lo;
+        dg = dg_lo;
         return step;
     }
 
