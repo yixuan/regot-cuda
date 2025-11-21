@@ -10,6 +10,7 @@
 #include <thrust/transform.h>
 #include <thrust/functional.h>
 #include <thrust/iterator/constant_iterator.h>
+#include <thrust/inner_product.h>
 
 // Utility functions
 #include "utils.h"
@@ -65,7 +66,8 @@ void launch_objfn_grad_sphess(
     int n, int m, int K,
     double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
-    double* d_work, int* d_iwork
+    double* d_work, int* d_iwork,
+    bool stage1 = true, bool stage2 = true
 );
 
 // Helper function to compute low-rank vectors y and s
@@ -93,6 +95,20 @@ void launch_low_rank_search_direc(
     const double ys,
     int size
 );
+
+// Functor for computing z = a * x + y
+template <typename T>
+struct axpy_functor
+{
+    T m_a;
+    axpy_functor(T a): m_a(a) {}
+
+    __host__ __device__
+    T operator()(const T& x, const T& y) const
+    {
+        return m_a * x + y;
+    }
+};
 
 // Class for the SPLR solver
 class SPLRSolver
@@ -134,6 +150,27 @@ private:
     int*         d_iwork;
     // Sparse Cholesky solver
     SparseCholeskySolver m_linsolver;
+
+    // Simple dot product
+    inline double dot(const double* d_x, const double* d_y, int size) const
+    {
+        thrust::device_ptr<const double> d_x_ptr = thrust::device_pointer_cast(d_x);
+        thrust::device_ptr<const double> d_y_ptr = thrust::device_pointer_cast(d_y);
+        return thrust::inner_product(d_x_ptr, d_x_ptr + size, d_y_ptr, 0.0);
+    }
+
+    // Compute z = a * x + y
+    inline void axpy(const double* d_x, const double* d_y, double a, int size, double* d_z) const
+    {
+        thrust::device_ptr<const double> d_x_ptr = thrust::device_pointer_cast(d_x);
+        thrust::device_ptr<const double> d_y_ptr = thrust::device_pointer_cast(d_y);
+        thrust::device_ptr<double> d_z_ptr = thrust::device_pointer_cast(d_z);
+
+        thrust::transform(d_x_ptr, d_x_ptr + size,
+                          d_y_ptr,
+                          d_z_ptr,
+                          axpy_functor<double>(a));
+    }
 
 public:
     // Constructor
@@ -251,7 +288,12 @@ public:
     }
 
     // Compute objective function value, gradient, and sparsified Hessian
-    size_t dual_objfn_grad_sphess(double density, double shift, double& objfn)
+    // Stage 1 computes objective function value and gradient
+    // Stage 2 computes sparsified Hessian
+    size_t dual_objfn_grad_sphess(
+        double density, double shift, double& objfn,
+        bool stage1 = true, bool stage2 = true
+    )
     {
         // Make sure density is within (0, 1)
         density = std::min(density, 1.0);
@@ -268,7 +310,8 @@ public:
             m_reg, shift, m_n, m_m, K,
             d_objfn, d_grad,
             d_Hvalues, d_Hcolind, d_Hrowptr,
-            d_work, d_iwork
+            d_work, d_iwork,
+            stage1, stage2
         );
 
         // Copy d_objfn to host
@@ -344,6 +387,214 @@ public:
             d_direc_ptr, d_direc_ptr + m_Hsize, constant_iter, d_direc_ptr,
             thrust::multiplies<double>()
         );
+    }
+
+    // Save d_gamma to d_gamma_prev, and d_grad to d_grad_prev
+    void save_history()
+    {
+        CUDA_CHECK(cudaMemcpy(d_gamma_prev, d_gamma, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(d_grad_prev, d_grad, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
+    }
+
+    // More-Thuente line search with Wolfe conditions
+    double line_search_wolfe(
+        double init_step, double cur_obj, bool& recompute_fg,
+        double c1 = 1e-4, double c2 = 0.9, int max_iter = 20
+    )
+    {
+        // We assume d_gamma has been copied to d_gamma_prev,
+        // so new point is computed as
+        //     d_gamma = d_gamma_prev + step * d_direc
+        // d_gamma_prev and d_direc are read-only during line search,
+        // and d_gamma and d_grad will be overwritten
+
+        // Typically the objective function value (f) and gradient (g)
+        // have been computed on the new point when line search exits,
+        // but there are cases that a different step is returned
+        // In such cases, we flag recompute_fg = true
+        recompute_fg = false;
+
+        // Initial step size
+        double step = init_step, step_max = 2.0;
+        double fx = cur_obj, dg = dot(d_grad_prev, d_direc, m_Hsize);
+
+        // Save the function value at the current x
+        const double fx_init = cur_obj;
+        // Projection of gradient on the search direction
+        const double dg_init = dg;
+        // Make sure d points to a descent direction
+        if (dg_init > 0.0)
+        {
+            recompute_fg = true;
+            return step;
+        }
+
+        // Tolerance for convergence test
+        // Sufficient decrease
+        const double test_decr = c1 * dg_init;
+        // Curvature
+        const double test_curv = -c2 * dg_init;
+
+        // The bracketing interval
+        double I_lo = 0.0, I_hi = std::numeric_limits<double>::infinity();
+        double fI_lo = 0.0, fI_hi = std::numeric_limits<double>::infinity();
+        double gI_lo = (1.0 - c1) * dg_init, gI_hi = std::numeric_limits<double>::infinity();
+        double fx_lo = fx_init, dg_lo = dg_init;
+
+        // Evaluate the current step size
+        // gamma = gamma_prev + step * direc
+        axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
+        // We only compute f and g, so label stage1 = true, stage2 = false
+        // In this case shift and K are not used
+        dual_objfn_grad_sphess(0.01, 0.001, fx, true, false);
+        // Get g'(direc)
+        dg = dot(d_grad, d_direc, m_Hsize);
+        std::cout << "fx = " << fx << std::endl;
+
+        // Convergence test
+        if (fx <= fx_init + step * test_decr && abs(dg) <= test_curv)
+        {
+            return step;
+        }
+
+        // Extrapolation factor
+        constexpr double delta = 1.1;
+        int iter;
+        for (iter = 0; iter < max_iter; iter++)
+        {
+            // ft = psi(step) = f(xp + step * drt) - f(xp) - step * test_decr
+            // gt = psi'(step) = dg - mu * dg_init
+            // mu = c1
+            const double ft = fx - fx_init - step * test_decr;
+            const double gt = dg - c1 * dg_init;
+
+            // Update step size and bracketing interval
+            double new_step;
+            if (ft > fI_lo)
+            {
+                // Case 1: ft > fl
+                new_step = step_selection(I_lo, I_hi, step, fI_lo, fI_hi, ft, gI_lo, gI_hi, gt);
+                // Sanity check: if the computed new_step is too small, typically due to
+                // extremely large value of ft, switch to the middle point
+                if (new_step <= 1e-12)
+                    new_step = (I_lo + step) / 2.0;
+
+                I_hi = step;
+                fI_hi = ft;
+                gI_hi = gt;
+            }
+            else if (gt * (I_lo - step) > 0.0)
+            {
+                // Case 2: ft <= fl, gt * (al - at) > 0
+                //
+                // Page 291 of Moré and Thuente (1994) suggests that
+                // newat = min(at + delta * (at - al), amax), delta in [1.1, 4]
+                new_step = std::min(step_max, step + delta * (step - I_lo));
+
+                I_lo = step;
+                fI_lo = ft;
+                gI_lo = gt;
+                fx_lo = fx;
+                dg_lo = dg;
+            }
+            else
+            {
+                // Case 3: ft <= fl, gt * (al - at) <= 0
+                new_step = step_selection(I_lo, I_hi, step, fI_lo, fI_hi, ft, gI_lo, gI_hi, gt);
+
+                I_hi = I_lo;
+                fI_hi = fI_lo;
+                gI_hi = gI_lo;
+
+                I_lo = step;
+                fI_lo = ft;
+                gI_lo = gt;
+                fx_lo = fx;
+                dg_lo = dg;
+            }
+
+            // Case 1 and 3 are interpolations, whereas Case 2 is extrapolation
+            // This means that Case 2 may return new_step = step_max,
+            // and we need to decide whether to accept this value
+            // 1. If both step and new_step equal to step_max, it means
+            //    step will have no further change, so we accept it
+            // 2. Otherwise, we need to test the function value and gradient
+            //    on step_max, and decide later
+
+            // In case step, new_step, and step_max are equal, directly return the computed x and fx
+            if (step == step_max && new_step >= step_max)
+            {
+                return step;
+            }
+            // Otherwise, recompute x and fx based on new_step
+            step = new_step;
+
+            if (step < 1e-12 || step > 1e12)
+            {
+                recompute_fg = true;
+                return init_step;
+            }
+
+            // Update parameter, function value, and gradient
+            axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
+            dual_objfn_grad_sphess(0.01, 0.001, fx, true, false);
+            dg = dot(d_grad, d_direc, m_Hsize);
+            std::cout << "fx = " << fx << std::endl;
+
+            // Convergence test
+            if (fx <= fx_init + step * test_decr && abs(dg) <= test_curv)
+            {
+                return step;
+            }
+
+            // Now assume step = step_max, and we need to decide whether to
+            // exit the line search (see the comments above regarding step_max)
+            // If we reach here, it means this step size does not pass the convergence
+            // test, so either the sufficient decrease condition or the curvature
+            // condition is not met yet
+            //
+            // Typically the curvature condition is harder to meet, and it is
+            // possible that no step size in [0, step_max] satisfies the condition
+            //
+            // But we need to make sure that its psi function value is smaller than
+            // the best one so far. If not, go to the next iteration and find a better one
+            if (step >= step_max)
+            {
+                const double ft_bound = fx - fx_init - step * test_decr;
+                if (ft_bound <= fI_lo)
+                {
+                    return step;
+                }
+            }
+
+            // If we have used up all line search iterations, then the strong Wolfe condition
+            // is not met. We choose not to raise an exception (unless no step satisfying
+            // sufficient decrease is found), but to return the best step size so far
+            if (iter >= max_iter - 1)
+            {
+                // First test whether the last step is better than I_lo
+                // If yes, return the last step
+                const double ft = fx - fx_init - step * test_decr;
+                if (ft <= fI_lo)
+                    return step;
+
+                // If not, then the best step size so far is I_lo, but it needs to be positive
+                if (I_lo <= 0.0)
+                {
+                    recompute_fg = true;
+                    return init_step;
+                }
+
+                // Return everything with _lo
+                recompute_fg = true;
+                step = I_lo;
+                fx = fx_lo;
+                dg = dg_lo;
+                return step;
+            }
+        }
+
+        return step;
     }
 
     // Output results to host -- transport plan and dual variables
@@ -433,6 +684,16 @@ void cuda_sinkhorn_splr(
         const bool low_rank = (iter > 0) && (ys > (eps * yy));
         // const double shift = std::min(gnorm, shift_max);
         solver.compute_search_direc(nnz, ys, low_rank, true);
+
+        // Line search will overwrite d_gamma and d_grad, so
+        // save d_gamma to d_gamma_prev, and d_grad to d_grad_prev
+        solver.save_history();
+
+        // Wolfe Line Search
+        bool recompute_fg = true;
+        alpha = solver.line_search_wolfe(
+            std::min(1.0, 1.5 * alpha), objfn, recompute_fg
+        );
 
         *niter = iter + 1;
     }

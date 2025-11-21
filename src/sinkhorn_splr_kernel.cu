@@ -410,7 +410,8 @@ void launch_T_computation(
     int n, int m, int K,
     double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
     double* d_objfn, double* d_grad,
-    double* d_values, int* d_indices
+    double* d_values, int* d_indices,
+    bool stage1 = true, bool stage2 = true
 )
 {
     // Pointer aliases
@@ -424,62 +425,71 @@ void launch_T_computation(
     size_t Ks = max(K, 1);
     Ks = min(Ks, N_total);
 
-    // Step 1: Zero out the reduction arrays
-    CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
+    // Stage 1 computes objective function value and gradient
+    if (stage1)
+    {
+        // Step 1: Zero out the reduction arrays
+        CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
 
-    // Step 2: Launch the fused kernel
-    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    dim3 gridDim;
-    gridDim.x = (m + blockDim.x - 1) / blockDim.x;
-    gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+        // Step 2: Launch the fused kernel
+        dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
+        dim3 gridDim;
+        gridDim.x = (m + blockDim.x - 1) / blockDim.x;
+        gridDim.y = (n + blockDim.y - 1) / blockDim.y;
 
-    T_fused_kernel<<<gridDim, blockDim>>>(
-        d_alpha, d_beta, d_M, reg, n, m,
-        d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
-    );
+        T_fused_kernel<<<gridDim, blockDim>>>(
+            d_alpha, d_beta, d_M, reg, n, m,
+            d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
+        );
 
-    // Step 3: Compute objfn and grad
-    dim3 threadsPerBlock(BLOCK_DIM);
-    dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
-        d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
-        reg, n, m,
-        d_objfn, d_grad
-    );
+        // Step 3: Compute objfn and grad
+        dim3 threadsPerBlock(BLOCK_DIM);
+        dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
+        obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
+            d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
+            reg, n, m,
+            d_objfn, d_grad
+        );
+    }
+    
+    // Stage 2 computes pointers for sparsified Hessian
+    if (stage2)
+    {
+        // Currently we do have a good Top-K implementation,
+        // so we directly sort the T values
+        // Step 4: Call thrust::sort_by_key to sort T values
 
-    // Currently we do have a good Top-K implementation,
-    // so we directly sort the T values
-    // Step 4: Call thrust::sort_by_key to sort T values
+        // Wrap raw device pointers with thrust::device_ptr
+        thrust::device_ptr<double> d_values_ptr = thrust::device_pointer_cast(d_values);
+        thrust::device_ptr<int> d_indices_ptr = thrust::device_pointer_cast(d_indices);
 
-    // Wrap raw device pointers with thrust::device_ptr
-    thrust::device_ptr<double> d_values_ptr = thrust::device_pointer_cast(d_values);
-    thrust::device_ptr<int> d_indices_ptr = thrust::device_pointer_cast(d_indices);
+        // Perform the in-place sorting according to T values (descending order)
+        thrust::sort_by_key(
+            d_values_ptr,
+            d_values_ptr + N_total,
+            d_indices_ptr,
+            ::cuda::std::greater<double>()
+        );
 
-    // Perform the in-place sorting according to T values (descending order)
-    thrust::sort_by_key(
-        d_values_ptr,
-        d_values_ptr + N_total,
-        d_indices_ptr,
-        ::cuda::std::greater<double>()
-    );
+        // Step 5: Add diagonal elements of Hsl to (values, indices)
+        // We no longer need values[K:] and indices[K:], so we overwrite these addresses
+        int Hsize = n + m - 1;
+        dim3 threadsPerBlock(BLOCK_DIM);
+        dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
+        write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
+            d_Trowsums, d_Tcolsums, shift, n, m, d_values + Ks, d_indices + Ks
+        );
 
-    // Step 5: Add diagonal elements of Hsl to (values, indices)
-    // We no longer need values[K:] and indices[K:], so we overwrite these addresses
-    int Hsize = n + m - 1;
-    dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
-        d_Trowsums, d_Tcolsums, shift, n, m, d_values + Ks, d_indices + Ks
-    );
-
-    // Step 6: Call thrust::sort_by_key on the first (K+Hsize) elements to sort indices (ascending order)
-    thrust::sort_by_key(
-        d_indices_ptr,
-        d_indices_ptr + (Ks + Hsize),
-        d_values_ptr
-    );
+        // Step 6: Call thrust::sort_by_key on the first (K+Hsize) elements to sort indices (ascending order)
+        thrust::sort_by_key(
+            d_indices_ptr,
+            d_indices_ptr + (Ks + Hsize),
+            d_values_ptr
+        );
+    }
 }
 
 // CUDA kernel to extract column indices and count the number of elements per row
@@ -572,6 +582,9 @@ void launch_csr_conversion(
 // Out: d_Hrowptr  [Hsize + 1] = [n+m]
 // Working space: d_work = (d_Trowsums, d_Tcolsums, d_Tsum), [n+m+1]
 // Working space: d_iwork = (d_indices, d_row_counts), [n*(m-1)+n+m-1] + [n+m-1] = [n*(m-1)+2*(n+m-1)]
+//
+// Stage 1 computes objective function value and gradient
+// Stage 2 computes sparsified Hessian
 void launch_objfn_grad_sphess(
     const double* d_gamma,
     const double* d_M,
@@ -580,7 +593,8 @@ void launch_objfn_grad_sphess(
     int n, int m, int K,
     double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
-    double* d_work, int* d_iwork
+    double* d_work, int* d_iwork,
+    bool stage1 = true, bool stage2 = true
 )
 {
     // Dimensions
@@ -601,12 +615,16 @@ void launch_objfn_grad_sphess(
         reg, shift, n, m, Ks,
         d_Trowsums, d_Tcolsums, d_Tsum,
         d_objfn, d_grad,
-        d_Hvalues, d_indices
+        d_Hvalues, d_indices,
+        stage1, stage2
     );
 
-    launch_csr_conversion(
-        d_indices, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
-    );
+    if (stage2)
+    {
+        launch_csr_conversion(
+            d_indices, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
+        );
+    }
 }
 
 // CUDA kernel to compute low-rank vectors y and s
