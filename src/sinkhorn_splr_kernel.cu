@@ -491,6 +491,133 @@ void launch_T_computation(
     }
 }
 
+// CUDA kernel to recompute nonzero elements according to sparsity pattern
+__global__ void recompute_nonzero_values_kernel(
+    const int* __restrict__ indices,
+    const double* __restrict__ Trowsums, 
+    const double* __restrict__ Tcolsums,
+    const double* __restrict__ alpha,
+    const double* __restrict__ beta,
+    const double* __restrict__ M,
+    double reg,
+    double shift,
+    int n,
+    int m,
+    int K,
+    double* __restrict__ values
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+
+    int Hsize = n + m - 1;
+    if (idx < K + Hsize)
+    {
+        // Index is based on Hsl (flattened)
+        int flat_ind_Hsl = indices[idx];
+
+        // Convert to (i, j) in Hsl
+        int i = flat_ind_Hsl / Hsize;
+        int j = flat_ind_Hsl % Hsize;
+
+        double Hval = 0.0;
+        if (i < n)
+        {
+            // Case 1: i < n -- diagonal elements of Hsl[:n, :n]
+            //                  Hsl[i, i] = Trowsums[i]
+            Hval = Trowsums[i] + shift;
+        }
+        else if (j < n)
+        {
+            // Case 2: i >= n, j < n -- Hsl[i, j] = T'[i - n, j] = T[j, i - n]
+            const int Mind = j * m + (i - n);
+            Hval = exp((alpha[j] + beta[i - n] - M[Mind]) / reg);
+        }
+        else
+        {
+            // Case 3: j >= n -- diagonal elements of Hsl[n:, n:]
+            Hval = Tcolsums[j - n] + shift;
+        }
+        values[idx] = Hval;
+    }
+}
+
+// Similar to launch_T_computation(), but with the following differences:
+// 1. The first (K+Hsize) elements of d_indices contain the sparsify pattern of Hsl
+// 2. This function keeps the first (K+Hsize) elements in d_indices unchanged
+// 3. Then we need to compute the corresponding Hsl values in d_values
+void launch_T_computation_fixed_ind(
+    const double* d_gamma,
+    const double* d_M,
+    const double* d_ab,
+    double reg, double shift,
+    int n, int m, int K,
+    double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
+    double* d_objfn, double* d_grad,
+    double* d_values, int* d_indices,
+    bool stage1 = true, bool stage2 = true
+)
+{
+    // Pointer aliases
+    const double* d_alpha = d_gamma;
+    const double* d_beta = d_gamma + n;
+
+    // Total number of T values
+    size_t N_total = n * (m - 1);
+
+    // Bound check
+    size_t Ks = max(K, 1);
+    Ks = min(Ks, N_total);
+
+    // Stage 1 computes objective function value and gradient
+    if (stage1)
+    {
+        // Step 1: Zero out the reduction arrays
+        CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
+
+        // Step 2: Launch the fused kernel
+        dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
+        dim3 gridDim;
+        gridDim.x = (m + blockDim.x - 1) / blockDim.x;
+        gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+
+        // At this step, we do not write to d_values and d_indices
+        constexpr bool write_T_and_indices = false;
+        T_fused_kernel<<<gridDim, blockDim>>>(
+            d_alpha, d_beta, d_M, reg, n, m, write_T_and_indices,
+            d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
+        );
+
+        // Step 3: Compute objfn and grad
+        dim3 threadsPerBlock(BLOCK_DIM);
+        dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
+        obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
+            d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
+            reg, n, m,
+            d_objfn, d_grad
+        );
+    }
+    
+    // Stage 2 computes pointers for sparsified Hessian
+    if (stage2)
+    {
+        // The first (K+Hsize) elements of d_indices are already given
+        // Then we need to write elements of Hsl to d_values
+        int Hsize = n + m - 1;
+        int KHsize = Ks + Hsize;
+        dim3 threadsPerBlock(BLOCK_DIM);
+        dim3 numBlocks_recompute_nonzero_values((KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
+        recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock>>>(
+            d_indices, d_Trowsums, d_Tcolsums, d_alpha, d_beta, d_M,
+            reg, shift, n, m, Ks, d_values
+        );
+    }
+}
+
 // CUDA kernel to extract column indices and count the number of elements per row
 //
 // In: indices      [nnz]
@@ -593,7 +720,8 @@ void launch_objfn_grad_sphess(
     double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
     double* d_work, int* d_iwork,
-    bool stage1 = true, bool stage2 = true
+    bool stage1 = true, bool stage2 = true,
+    bool fixed_ind = false
 )
 {
     // Dimensions
@@ -609,14 +737,28 @@ void launch_objfn_grad_sphess(
     int* d_indices = d_iwork;
     int* d_row_counts = d_iwork + (Te + Hsize);
 
-    launch_T_computation(
-        d_gamma, d_M, d_ab,
-        reg, shift, n, m, Ks,
-        d_Trowsums, d_Tcolsums, d_Tsum,
-        d_objfn, d_grad,
-        d_Hvalues, d_indices,
-        stage1, stage2
-    );
+    if (fixed_ind)
+    {
+        launch_T_computation_fixed_ind(
+            d_gamma, d_M, d_ab,
+            reg, shift, n, m, Ks,
+            d_Trowsums, d_Tcolsums, d_Tsum,
+            d_objfn, d_grad,
+            d_Hvalues, d_indices,
+            stage1, stage2
+        );
+    }
+    else
+    {
+        launch_T_computation(
+            d_gamma, d_M, d_ab,
+            reg, shift, n, m, Ks,
+            d_Trowsums, d_Tcolsums, d_Tsum,
+            d_objfn, d_grad,
+            d_Hvalues, d_indices,
+            stage1, stage2
+        );
+    }
 
     if (stage2)
     {
