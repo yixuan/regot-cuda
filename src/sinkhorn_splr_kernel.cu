@@ -122,6 +122,7 @@ __global__ void T_fused_kernel(
     double reg,
     int n,
     int m,
+    bool write_T_and_indices,
     double* __restrict__ row_sums,
     double* __restrict__ col_sums,
     double* __restrict__ total_sum,
@@ -175,23 +176,19 @@ __global__ void T_fused_kernel(
         // 1. Compute T[i, j]
         double T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
 
-        // 2. Fill flat index only when j < m-1
-        if (j < m - 1)
+        // 2. Fill flat_indices and T_out only when j < m-1,
+        //    excluding the last row of T' (last column of T)
+        if (write_T_and_indices && j < m - 1)
         {
             flat_indices[flat_idx_T_out] = flat_idx_Hsl;
+            T_out[flat_idx_T_out] = T_ij;
         }
 
         // 3. Accumulate to shared memory (should be fast)
+        //    (The sums include all the original elements)
         atomicAdd(&s_row[ty], T_ij);
         atomicAdd(&s_col[tx], T_ij);
         atomicAdd(&s_block_sum, T_ij);
-
-        // 4. Write to T_out and exclude the last row of T' (last column of T)
-        //    (The sums include all the original elements)
-        if (j < m - 1)
-        {
-            T_out[flat_idx_T_out] = T_ij;
-        }
     }
 
     // Synchronize to ensure all shared memory writes are complete
@@ -440,8 +437,10 @@ void launch_T_computation(
         gridDim.x = (m + blockDim.x - 1) / blockDim.x;
         gridDim.y = (n + blockDim.y - 1) / blockDim.y;
 
+        // For this helper function, we always compute d_values and d_indices
+        constexpr bool write_T_and_indices = true;
         T_fused_kernel<<<gridDim, blockDim>>>(
-            d_alpha, d_beta, d_M, reg, n, m,
+            d_alpha, d_beta, d_M, reg, n, m, write_T_and_indices,
             d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
         );
 
