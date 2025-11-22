@@ -107,6 +107,8 @@
 // 3. Write (T_t)' (T' excluding the last row) to T_out
 // 4. Compute the flat indices in the Hsl matrix coordinates for the subsequent Top-K selection
 //
+// The option write_T_and_indices controls whether do steps 3 and 4
+//
 // In: alpha          [n]
 // In: beta           [m]
 // In: M              [n*m]
@@ -194,7 +196,7 @@ __global__ void T_fused_kernel(
     // Synchronize to ensure all shared memory writes are complete
     __syncthreads();
 
-    // 5. Write partial sums back to global memory
+    // 4. Write partial sums back to global memory
     // The first column of threads (tx=0) writes back the row sums
     if (tx == 0 && i < n)
     {
@@ -384,9 +386,15 @@ __global__ void write_diagonal_kernel(
 // 5. The corresponding (flattened) indices are stored in d_indices
 // 6. Add diagonal elements of Hsl matrix (plus a shift) to d_values and corresponding indices to d_indices
 //    (overwrite d_values[K:] and d_indices[K:])
-// 7. The first (K+N) elements in d_indices are in ascending order, N = Hsize = n+m-1
+// 7. The first (K+Hsize) elements in d_indices are in ascending order, Hsize = n+m-1
 //
-// Assume K+N = K+n+m-1 <= n*(m-1), or we can simply allocate n*(m-1)+n+m-1=(n+1)*m-1 elements
+// We call 1-3 stage 1 and 4-7 stage 2, and use two flags stage1 and stage2 to control
+// which parts to compute
+// The motivation is that sometimes we need to first obtain gradient norm before
+// computing the sparsified Hessian (e.g., the density and shift depends on gradient norm)
+// In stage 1, shift and K are not used
+//
+// Assume K+Hsize = K+n+m-1 <= n*(m-1), or we can simply allocate n*(m-1)+Hsize=(n+1)*m-1 elements
 // for d_values and d_indices
 //
 // In: d_gamma      [n+m]        d_gamma = (d_alpha, d_beta)
@@ -411,20 +419,13 @@ void launch_T_computation(
     bool stage1 = true, bool stage2 = true
 )
 {
-    // Pointer aliases
-    const double* d_alpha = d_gamma;
-    const double* d_beta = d_gamma + n;
-
-    // Total number of T values
-    size_t N_total = n * (m - 1);
-
-    // Bound check
-    size_t Ks = max(K, 1);
-    Ks = min(Ks, N_total);
-
     // Stage 1 computes objective function value and gradient
     if (stage1)
     {
+        // Pointer aliases
+        const double* d_alpha = d_gamma;
+        const double* d_beta = d_gamma + n;
+
         // Step 1: Zero out the reduction arrays
         CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
@@ -457,6 +458,14 @@ void launch_T_computation(
     // Stage 2 computes pointers for sparsified Hessian
     if (stage2)
     {
+        // Total number of T elements
+        size_t Te = n * (m - 1);
+        size_t Hsize = n + m - 1;
+
+        // Bound check
+        size_t Ks = max(K, 1);
+        Ks = min(Ks, Te);
+
         // Currently we do have a good Top-K implementation,
         // so we directly sort the T values
         // Step 4: Call thrust::sort_by_key to sort T values
@@ -468,14 +477,13 @@ void launch_T_computation(
         // Perform the in-place sorting according to T values (descending order)
         thrust::sort_by_key(
             d_values_ptr,
-            d_values_ptr + N_total,
+            d_values_ptr + Te,
             d_indices_ptr,
-            ::cuda::std::greater<double>()
+            thrust::greater<double>()
         );
 
         // Step 5: Add diagonal elements of Hsl to (values, indices)
         // We no longer need values[K:] and indices[K:], so we overwrite these addresses
-        int Hsize = n + m - 1;
         dim3 threadsPerBlock(BLOCK_DIM);
         dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
         write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
@@ -491,7 +499,10 @@ void launch_T_computation(
     }
 }
 
-// CUDA kernel to recompute nonzero elements according to sparsity pattern
+// CUDA kernel to recompute nonzero elements according to existing sparsity pattern
+//
+// In: indices  [K+Hsize]
+// Out: values  [K+Hsize]
 __global__ void recompute_nonzero_values_kernel(
     const int* __restrict__ indices,
     const double* __restrict__ Trowsums, 
@@ -547,7 +558,7 @@ __global__ void recompute_nonzero_values_kernel(
 // 1. The first (K+Hsize) elements of d_indices contain the sparsify pattern of Hsl
 // 2. This function keeps the first (K+Hsize) elements in d_indices unchanged
 // 3. Then we need to compute the corresponding Hsl values in d_values
-void launch_T_computation_fixed_ind(
+void launch_T_computation_fixed_indices(
     const double* d_gamma,
     const double* d_M,
     const double* d_ab,
@@ -562,13 +573,6 @@ void launch_T_computation_fixed_ind(
     // Pointer aliases
     const double* d_alpha = d_gamma;
     const double* d_beta = d_gamma + n;
-
-    // Total number of T values
-    size_t N_total = n * (m - 1);
-
-    // Bound check
-    size_t Ks = max(K, 1);
-    Ks = min(Ks, N_total);
 
     // Stage 1 computes objective function value and gradient
     if (stage1)
@@ -605,10 +609,17 @@ void launch_T_computation_fixed_ind(
     // Stage 2 computes pointers for sparsified Hessian
     if (stage2)
     {
+        // Total number of T elements
+        size_t Te = n * (m - 1);
+        size_t Hsize = n + m - 1;
+
+        // Bound check
+        size_t Ks = max(K, 1);
+        Ks = min(Ks, Te);
+        size_t KHsize = Ks + Hsize;
+
         // The first (K+Hsize) elements of d_indices are already given
-        // Then we need to write elements of Hsl to d_values
-        int Hsize = n + m - 1;
-        int KHsize = Ks + Hsize;
+        // Step 4: Write elements of Hsl to d_values
         dim3 threadsPerBlock(BLOCK_DIM);
         dim3 numBlocks_recompute_nonzero_values((KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
         recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock>>>(
@@ -721,7 +732,7 @@ void launch_objfn_grad_sphess(
     double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
     double* d_work, int* d_iwork,
     bool stage1 = true, bool stage2 = true,
-    bool fixed_ind = false
+    bool fixed_indices = false
 )
 {
     // Dimensions
@@ -737,9 +748,9 @@ void launch_objfn_grad_sphess(
     int* d_indices = d_iwork;
     int* d_row_counts = d_iwork + (Te + Hsize);
 
-    if (fixed_ind)
+    if (fixed_indices)
     {
-        launch_T_computation_fixed_ind(
+        launch_T_computation_fixed_indices(
             d_gamma, d_M, d_ab,
             reg, shift, n, m, Ks,
             d_Trowsums, d_Tcolsums, d_Tsum,
