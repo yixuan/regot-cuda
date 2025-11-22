@@ -205,7 +205,7 @@ __global__ void compute_log_vector_kernel(
     // Even if size > gridDim * blockDim, the loop will cover all elements
     for (int i = idx; i < size; i += stride)
     {
-        logx[i] = std::log(x[i]);
+        logx[i] = log(x[i]);
     }
 }
 
