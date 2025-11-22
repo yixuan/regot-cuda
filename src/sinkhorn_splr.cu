@@ -67,7 +67,8 @@ void launch_objfn_grad_sphess(
     double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
     double* d_work, int* d_iwork,
-    bool stage1 = true, bool stage2 = true
+    bool stage1 = true, bool stage2 = true,
+    bool fixed_indices = false
 );
 
 // Helper function to compute low-rank vectors y and s
@@ -292,7 +293,8 @@ public:
     // Stage 2 computes sparsified Hessian
     size_t dual_objfn_grad_sphess(
         double density, double shift, double& objfn,
-        bool stage1 = true, bool stage2 = true
+        bool stage1 = true, bool stage2 = true,
+        bool fixed_indices = false
     )
     {
         // Make sure density is within (0, 1)
@@ -311,7 +313,8 @@ public:
             d_objfn, d_grad,
             d_Hvalues, d_Hcolind, d_Hrowptr,
             d_work, d_iwork,
-            stage1, stage2
+            stage1, stage2,
+            fixed_indices
         );
 
         // Copy d_objfn to host
@@ -399,6 +402,7 @@ public:
     // More-Thuente line search with Wolfe conditions
     double line_search_wolfe(
         double init_step, double cur_obj, bool& recompute_fg,
+        bool fixed_indices = false,
         double c1 = 1e-4, double c2 = 0.9, int max_iter = 20
     )
     {
@@ -446,7 +450,7 @@ public:
         axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
         // We only compute f and g, so label stage1 = true, stage2 = false
         // In this case shift and K are not used
-        dual_objfn_grad_sphess(0.01, 0.001, fx, true, false);
+        dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
         // Get g'(direc)
         dg = dot(d_grad, d_direc, m_Hsize);
 
@@ -536,7 +540,7 @@ public:
 
             // Update parameter, function value, and gradient
             axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
-            dual_objfn_grad_sphess(0.01, 0.001, fx, true, false);
+            dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
             dg = dot(d_grad, d_direc, m_Hsize);
 
             // Convergence test
@@ -637,15 +641,18 @@ void cuda_sinkhorn_splr(
 )
 {
     // Algorithmic parameters
+    // density
     density_max = std::min(density_max, 1.0);
     density_max = std::max(density_max, 0.0);
     const double density_min = 0.01 * density_max;
     double density = 0.1 * density_max;
-
+    // shift
     double shift = shift_max;
-
+    // Kmax -- maximum number of nonzero elements in sparsified T_t
     size_t Kmax = static_cast<size_t>(density_max * n * (m - 1));
     Kmax = std::max(Kmax, size_t(1));
+    // pattern_cycle -- cycle length of reusing sparsity pattern
+    int pattern_cycle = 10;
 
     // Create solver object
     SPLRSolver solver(M, a, b, reg, n, m, Kmax);
@@ -691,7 +698,11 @@ void cuda_sinkhorn_splr(
         // When <y, s> is too small, don't use low-rank update
         constexpr double eps = 1e-6;  // Or use std::numeric_limits<double>::epsilon();
         const bool low_rank = (iter > 0) && (ys > (eps * yy));
-        solver.compute_search_direc(nnz, ys, low_rank, true);
+        // Flags to indicate whether we need to recompute sparsity pattern
+        const bool analyze_pattern = (iter % pattern_cycle == 0);
+        const bool update_pattern = (iter % pattern_cycle == (pattern_cycle - 1));
+
+        solver.compute_search_direc(nnz, ys, low_rank, analyze_pattern);
 
         // Line search will overwrite d_gamma and d_grad, so
         // save d_gamma to d_gamma_prev, and d_grad to d_grad_prev
@@ -705,7 +716,7 @@ void cuda_sinkhorn_splr(
         // Otherwise, we need to recompute d_gamma, d_objfn, and d_grad
         bool recompute_fg = true;
         alpha = solver.line_search_wolfe(
-            std::min(1.0, 1.5 * alpha), objfn, recompute_fg
+            std::min(1.0, 1.5 * alpha), objfn, recompute_fg, !update_pattern
         );
 
         // Recompute the new point if needed
@@ -714,19 +725,30 @@ void cuda_sinkhorn_splr(
             // d_gamma = d_gamma_prev + alpha * direc
             solver.update_gamma(alpha);
             // Compute f and g on new point d_gamma
-            solver.dual_objfn_grad_sphess(density, shift, objfn, true, false);
+            solver.dual_objfn_grad_sphess(density, shift, objfn, true, false, !update_pattern);
         }
 
         // Adjust density according to gnorm change
         const double gnorm_pre = gnorm;
         gnorm = solver.grad_norm();
-        const bool bad_move = (gnorm_pre < gnorm_init) && (gnorm > gnorm_pre);
-        density *= (bad_move ? 1.1 : 0.99);
-        density = std::min(density_max, std::max(density_min, density));
-        
+        if (update_pattern)
+        {
+            const bool bad_move = (gnorm_pre < gnorm_init) && (gnorm > gnorm_pre);
+            density *= (bad_move ? 1.1 : 0.99);
+            density = std::min(density_max, std::max(density_min, density));
+        }
+
         // Compute sphess
         shift = std::min(gnorm, shift_max);
-        nnz = solver.dual_objfn_grad_sphess(density, shift, objfn, false, true);
+        nnz = solver.dual_objfn_grad_sphess(density, shift, objfn, false, true, !update_pattern);
+
+        if (verbose >= 2)
+        {
+            std::cout << "[lowrank]---------------------------------------------------" << std::endl;
+            std::cout << "║ ys = " << ys << ", yy = " << yy << std::endl;
+            std::cout << "║ low_rank = " << low_rank << std::endl;
+            std::cout << "===========================================================" << std::endl << std::endl;
+        }
 
         *niter = iter + 1;
     }
