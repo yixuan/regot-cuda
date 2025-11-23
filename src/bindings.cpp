@@ -15,7 +15,7 @@ void cuda_sinkhorn_bcd(
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max, double shift_max, int verbose,
+    double density_max, double shift_max, int pattern_cycle, int verbose,
     const double* x0 = nullptr, double* dual = nullptr
 );
 
@@ -208,6 +208,13 @@ py::dict sinkhorn_splr(
         shift_max = std::max(shift_max, 0.0);
     }
 
+    // Get pattern_cycle from kwargs
+    int pattern_cycle = 10;
+    if (kwargs.contains("pattern_cycle"))
+    {
+        pattern_cycle = py::cast<int>(kwargs["pattern_cycle"]);
+    }
+
     // Create output arrays
     py::array_t<double> P = py::array_t<double>({n, m});
     py::buffer_info P_buf = P.request();
@@ -222,7 +229,7 @@ py::dict sinkhorn_splr(
     cuda_sinkhorn_splr(
         M_ptr, a_ptr, b_ptr, P_ptr,
         reg, max_iter, tol, n, m, &niter,
-        density_max, shift_max, verbose,
+        density_max, shift_max, pattern_cycle, verbose,
         x0_ptr, dual_ptr
     );
 
