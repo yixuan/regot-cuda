@@ -32,9 +32,11 @@
         } \
     } while (0)
 
-// Define block dimensions (16x16 = 256 threads)
-#define BLOCK_DIM_X 16
-#define BLOCK_DIM_Y 16
+// Define block dimensions (32x8 = 256 threads)
+// BLOCK_DIM_X is the warp size 32, facilitating fast
+// intra-warp reduction using __shfl_down_sync()
+#define BLOCK_DIM_X 32
+#define BLOCK_DIM_Y 8
 #define BLOCK_DIM 256
 
 
@@ -101,133 +103,6 @@
 
 
 
-// Fused CUDA kernel for computation on T
-// 1. Compute T[i, j] = exp(...)
-// 2. Perform parallel reduction for row sums, column sums, and total sum using shared memory
-// 3. Write (T_t)' (T' excluding the last row) to T_out
-// 4. Compute the flat indices in the Hsl matrix coordinates for the subsequent Top-K selection
-//
-// The option write_T_and_indices controls whether do steps 3 and 4
-//
-// In: alpha          [n]
-// In: beta           [m]
-// In: M              [n*m]
-// Out: row_sums      [n]        Corresponds to Trowsums
-// Out: col_sums      [m]        Corresponds to Tcolsums
-// Out: total_sum     [1]        Corresponds to Tsum
-// Out: T_out         [n*(m-1)]  Corresponds to values
-// Out: flat_indices  [n*(m-1)]  Corresponds to indices
-__global__ void T_fused_kernel(
-    const double* __restrict__ alpha,
-    const double* __restrict__ beta,
-    const double* __restrict__ M,
-    double reg,
-    int n,
-    int m,
-    bool write_T_and_indices,
-    double* __restrict__ row_sums,
-    double* __restrict__ col_sums,
-    double* __restrict__ total_sum,
-    double* __restrict__ T_out,
-    int* __restrict__ flat_indices
-)
-{
-    // Shared memory for partial reductions
-    // One element per thread in the x-dimension of the block
-    __shared__ double s_col[BLOCK_DIM_X];
-    // One element per thread in the y-dimension of the block
-    __shared__ double s_row[BLOCK_DIM_Y];
-    // Block's partial sum
-    __shared__ double s_block_sum;
-
-    // Indices
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    // Global row index
-    int i = blockIdx.y * BLOCK_DIM_Y + ty;
-    // Global column index
-    int j = blockIdx.x * BLOCK_DIM_X + tx;
-
-    // Initialize shared memory
-    // Only one thread per row/column needs to do this
-    if (tx == 0)
-    {
-        s_row[ty] = 0.0;
-    }
-    if (ty == 0)
-    {
-        s_col[tx] = 0.0;
-    }
-    if (tx == 0 && ty == 0)
-    {
-        s_block_sum = 0.0;
-    }
-    __syncthreads();
-
-    // Boundary check and computation
-    if (i < n && j < m)
-    {
-        // Flattened index reading M[i, j]
-        int flat_idx_M = i * m + j;
-        // We read T_t by row, and write to T_out [n*(m-1)]
-        // T_t[i, j] -> T_out[i * (m-1) + j]
-        int flat_idx_T_out = flat_idx_M - i;  // == i * (m - 1) + j;
-        // Index of T_t[i, j] in flattened Hsl matrix
-        int flat_idx_Hsl = (n + j) * (n + m - 1) + i;
-
-        // 1. Compute T[i, j]
-        double T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
-
-        // 2. Fill flat_indices and T_out only when j < m-1,
-        //    excluding the last row of T' (last column of T)
-        if (write_T_and_indices && j < m - 1)
-        {
-            flat_indices[flat_idx_T_out] = flat_idx_Hsl;
-            T_out[flat_idx_T_out] = T_ij;
-        }
-
-        // 3. Accumulate to shared memory (should be fast)
-        //    (The sums include all the original elements)
-        atomicAdd(&s_row[ty], T_ij);
-        atomicAdd(&s_col[tx], T_ij);
-        atomicAdd(&s_block_sum, T_ij);
-    }
-
-    // Synchronize to ensure all shared memory writes are complete
-    __syncthreads();
-
-    // 4. Write partial sums back to global memory
-    // The first column of threads (tx=0) writes back the row sums
-    if (tx == 0 && i < n)
-    {
-        atomicAdd(&row_sums[i], s_row[ty]);
-    }
-    // The first row of threads (ty=0) writes back the column sums
-    if (ty == 0 && j < m)
-    {
-        atomicAdd(&col_sums[j], s_col[tx]);
-    }
-    // Write back the block's partial sum
-    // Only one thread per block does this
-    if (tx == 0 && ty == 0)
-    {
-        atomicAdd(total_sum, s_block_sum);
-    }
-}
-
-// CUDA kernel to compute objective function value (f) and gradient (g)
-//
-// f = reg * sum(T) - <alpha, a> - <beta, b>
-// g = (Trowsums - a, Tcolsums_t - b_t)
-//
-// In: ab        [n+m]       ab = (a, b)
-// In: gamma     [n+m]       gamma = (alpha, beta)
-// In: Trowsums  [n]
-// In: Tcolsums  [m]
-// In: Tsum      [1]
-// Out: objfn    [1]
-// Out: grad     [n+m-1]
-
 // Helper function: intra-warp reduction
 __device__ __forceinline__ double warp_reduce_sum(double val)
 {
@@ -277,6 +152,137 @@ __device__ __forceinline__ double block_reduce_sum(double val)
     return sum;
 }
 
+// Fused CUDA kernel for computation on T
+// 1. Compute T[i, j] = exp(...)
+// 2. Perform parallel reduction for row sums, column sums, and total sum using shared memory
+// 3. Write (T_t)' (T' excluding the last row) to T_out
+// 4. Compute the flat indices in the Hsl matrix coordinates for the subsequent Top-K selection
+//
+// The option write_T_and_indices controls whether do steps 3 and 4
+//
+// In: alpha          [n]
+// In: beta           [m]
+// In: M              [n*m]
+// Out: row_sums      [n]        Corresponds to Trowsums
+// Out: col_sums      [m]        Corresponds to Tcolsums
+// Out: total_sum     [1]        Corresponds to Tsum
+// Out: T_out         [n*(m-1)]  Corresponds to values
+// Out: flat_indices  [n*(m-1)]  Corresponds to indices
+__global__ void T_fused_kernel(
+    const double* __restrict__ alpha,
+    const double* __restrict__ beta,
+    const double* __restrict__ M,
+    double reg,
+    int n,
+    int m,
+    bool write_T_and_indices,
+    double* __restrict__ row_sums,
+    double* __restrict__ col_sums,
+    double* __restrict__ total_sum,
+    double* __restrict__ T_out,
+    int* __restrict__ flat_indices
+)
+{
+    // Shared memory for partial column sums
+    // Each block contains an array of size BLOCK_DIM_X
+    // s_col_sum[tx] collects the sum of the tx-th
+    // column in this block
+    // Each block column is of length BLOCK_DIM_Y
+    __shared__ double s_col_sum[BLOCK_DIM_X];
+    // Collects the sum of the entire block
+    __shared__ double s_block_sum;
+
+    // Indices
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    // Global row index
+    int i = blockIdx.y * blockDim.y + ty;
+    // Global column index
+    int j = blockIdx.x * blockDim.x + tx;
+
+    // Initialize shared memory
+    // Only one thread per column needs to do this
+    // Let the first row handle this
+    if (ty == 0)
+    {
+        s_col_sum[tx] = 0.0;
+    }
+    if (tx == 0 && ty == 0)
+    {
+        s_block_sum = 0.0;
+    }
+    __syncthreads();
+
+    // Boundary check and computation
+    double T_ij = 0.0;
+    if (i < n && j < m)
+    {
+        // Flattened index reading M[i, j]
+        int flat_idx_M = i * m + j;
+        // We read T_t by row, and write to T_out [n*(m-1)]
+        // T_t[i, j] -> T_out[i * (m-1) + j]
+        int flat_idx_T_out = flat_idx_M - i;  // == i * (m - 1) + j;
+        // Index of T_t[i, j] in flattened Hsl matrix
+        int flat_idx_Hsl = (n + j) * (n + m - 1) + i;
+
+        // 1. Compute T[i, j]
+        T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
+
+        // 2. Fill flat_indices and T_out only when j < m-1,
+        //    excluding the last row of T' (last column of T)
+        if (write_T_and_indices && j < m - 1)
+        {
+            flat_indices[flat_idx_T_out] = flat_idx_Hsl;
+            T_out[flat_idx_T_out] = T_ij;
+        }
+
+        // 3. Accumulate to shared memory (should be fast)
+        //    (The sums include all the original elements)
+        atomicAdd(&s_col_sum[tx], T_ij);
+    }
+
+    // Fast reduction within the warp, which is exactly
+    // one row in the block
+    double row_partial_sum = warp_reduce_sum(T_ij);
+
+    // 4. Write partial sums back to global memory
+    // The first column of threads (tx=0) writes back the row sums
+    // to the global memory
+    // At the same time, accumulate block row sums to block total sum
+    if (tx == 0 && i < n)
+    {
+        atomicAdd(&row_sums[i], row_partial_sum);
+        atomicAdd(&s_block_sum, row_partial_sum);
+    }
+    // Make sure s_col_sum and s_block_sum have finished
+    __syncthreads();
+
+    // The first row of threads (ty=0) writes back the column sums
+    // to the global memory
+    if (ty == 0 && j < m)
+    {
+        atomicAdd(&col_sums[j], s_col_sum[tx]);
+    }
+    // Write back the block's partial sum
+    // Only one thread per block does this
+    if (tx == 0 && ty == 0)
+    {
+        atomicAdd(total_sum, s_block_sum);
+    }
+}
+
+// CUDA kernel to compute objective function value (f) and gradient (g)
+//
+// f = reg * sum(T) - <alpha, a> - <beta, b>
+// g = (Trowsums - a, Tcolsums_t - b_t)
+//
+// In: ab        [n+m]       ab = (a, b)
+// In: gamma     [n+m]       gamma = (alpha, beta)
+// In: Trowsums  [n]
+// In: Tcolsums  [m]
+// In: Tsum      [1]
+// Out: objfn    [1]
+// Out: grad     [n+m-1]
 __global__ void obj_grad_kernel(
     const double* __restrict__ ab,
     const double* __restrict__ gamma,
