@@ -66,7 +66,7 @@ void launch_objfn_grad_sphess(
     double reg, double shift,
     int n, int m, int K,
     double* d_objfn, double* d_grad,
-    double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
+    double* d_Hvalues, int* d_Hflatind, int* d_Hcolind, int* d_Hrowptr,
     double* d_work, int* d_iwork,
     bool stage1 = true, bool stage2 = true,
     bool fixed_indices = false
@@ -145,6 +145,7 @@ private:
     double*      d_invA_y;
     // Sparsified Hessian in CSR representation
     double*      d_Hvalues;
+    int*         d_Hflatind;
     int*         d_Hcolind;
     int*         d_Hrowptr;
     // Working space
@@ -191,11 +192,12 @@ public:
         CUDA_CHECK(cudaMalloc(&d_y, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_s, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_invA_y, m_Hsize * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_Hvalues, (m_Te + m_Hsize) * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_Hvalues, (Kmax + m_Hsize) * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_Hflatind, (Kmax + m_Hsize) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_Hcolind, (Kmax + m_Hsize) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_Hrowptr, (m_Hsize + 1) * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_work, (m_n + m_m + 1) * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_iwork, (m_Te + 2 * m_Hsize) * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_work, (m_n + m_m + 1 + m_Te) * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_iwork, std::max(m_Te, m_Hsize) * sizeof(int)));
 
         // Pointer aliases
         d_alpha = d_gamma;
@@ -226,6 +228,7 @@ public:
         CUDA_CHECK(cudaFree(d_s));
         CUDA_CHECK(cudaFree(d_invA_y));
         CUDA_CHECK(cudaFree(d_Hvalues));
+        CUDA_CHECK(cudaFree(d_Hflatind));
         CUDA_CHECK(cudaFree(d_Hcolind));
         CUDA_CHECK(cudaFree(d_Hrowptr));
         CUDA_CHECK(cudaFree(d_work));
@@ -312,7 +315,7 @@ public:
             d_gamma, d_M, d_ab,
             m_reg, shift, m_n, m_m, K,
             d_objfn, d_grad,
-            d_Hvalues, d_Hcolind, d_Hrowptr,
+            d_Hvalues, d_Hflatind, d_Hcolind, d_Hrowptr,
             d_work, d_iwork,
             stage1, stage2,
             fixed_indices

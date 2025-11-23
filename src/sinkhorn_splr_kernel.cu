@@ -158,7 +158,7 @@ __device__ __forceinline__ double block_reduce_sum(double val)
 // 3. Write (T_t)' (T' excluding the last row) to T_out
 // 4. Compute the flat indices in the Hsl matrix coordinates for the subsequent Top-K selection
 //
-// The option write_T_and_indices controls whether do steps 3 and 4
+// The option write_values_and_indices controls whether do steps 3 and 4
 //
 // In: alpha          [n]
 // In: beta           [m]
@@ -175,7 +175,7 @@ __global__ void T_fused_kernel(
     double reg,
     int n,
     int m,
-    bool write_T_and_indices,
+    bool write_values_and_indices,
     double* __restrict__ row_sums,
     double* __restrict__ col_sums,
     double* __restrict__ total_sum,
@@ -230,7 +230,7 @@ __global__ void T_fused_kernel(
 
         // 2. Fill flat_indices and T_out only when j < m-1,
         //    excluding the last row of T' (last column of T)
-        if (write_T_and_indices && j < m - 1)
+        if (write_values_and_indices && j < m - 1)
         {
             flat_indices[flat_idx_T_out] = flat_idx_Hsl;
             T_out[flat_idx_T_out] = T_ij;
@@ -384,24 +384,10 @@ __global__ void write_diagonal_kernel(
 
 // Helper function to launch CUDA computations on T
 //
-// Given gamma = (alpha, beta), M, and ab = (a, b) (all on device), and reg:
+// Given gamma = (alpha, beta), M, ab = (a, b) (all on device), and reg:
 // 1. Compute T matrix
 // 2. Compute row/column/total sums of T
 // 3. Compute objective function value objfn and gradient grad
-// 4. The largest K elements of (T_t)' are stored in the first K elements in d_values
-// 5. The corresponding (flattened) indices are stored in d_indices
-// 6. Add diagonal elements of Hsl matrix (plus a shift) to d_values and corresponding indices to d_indices
-//    (overwrite d_values[K:] and d_indices[K:])
-// 7. The first (K+Hsize) elements in d_indices are in ascending order, Hsize = n+m-1
-//
-// We call 1-3 stage 1 and 4-7 stage 2, and use two flags stage1 and stage2 to control
-// which parts to compute
-// The motivation is that sometimes we need to first obtain gradient norm before
-// computing the sparsified Hessian (e.g., the density and shift depends on gradient norm)
-// In stage 1, shift and K are not used
-//
-// Assume K+Hsize = K+n+m-1 <= n*(m-1), or we can simply allocate n*(m-1)+Hsize=(n+1)*m-1 elements
-// for d_values and d_indices
 //
 // In: d_gamma      [n+m]        d_gamma = (d_alpha, d_beta)
 // In: d_M          [n*m]
@@ -411,106 +397,132 @@ __global__ void write_diagonal_kernel(
 // Out: d_Tsum      [1]
 // Out: d_objfn     [1]
 // Out: d_grad      [n+m-1]
-// Out: d_values    [n*(m-1)+n+m-1]
-// Out: d_indices   [n*(m-1)+n+m-1]
+// Out: d_values    [n*(m-1)]
+// Out: d_indices   [n*(m-1)]
 void launch_T_computation(
     const double* d_gamma,
     const double* d_M,
     const double* d_ab,
-    double reg, double shift,
-    int n, int m, int K,
+    double reg,
+    int n, int m,
+    bool write_values_and_indices,
     double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
     double* d_objfn, double* d_grad,
-    double* d_values, int* d_indices,
-    bool stage1 = true, bool stage2 = true
+    double* d_values, int* d_indices
 )
 {
-    // Stage 1 computes objective function value and gradient
-    if (stage1)
-    {
-        // Pointer aliases
-        const double* d_alpha = d_gamma;
-        const double* d_beta = d_gamma + n;
+    // Pointer aliases
+    const double* d_alpha = d_gamma;
+    const double* d_beta = d_gamma + n;
 
-        // Step 1: Zero out the reduction arrays
-        CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
-        CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
-        CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
-        CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
+    // Zero out the reduction arrays
+    CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
 
-        // Step 2: Launch the fused kernel
-        dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-        dim3 gridDim;
-        gridDim.x = (m + blockDim.x - 1) / blockDim.x;
-        gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+    // Launch the fused kernel
+    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
+    dim3 gridDim;
+    gridDim.x = (m + blockDim.x - 1) / blockDim.x;
+    gridDim.y = (n + blockDim.y - 1) / blockDim.y;
 
-        // For this helper function, we always compute d_values and d_indices
-        constexpr bool write_T_and_indices = true;
-        T_fused_kernel<<<gridDim, blockDim>>>(
-            d_alpha, d_beta, d_M, reg, n, m, write_T_and_indices,
-            d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
-        );
+    T_fused_kernel<<<gridDim, blockDim>>>(
+        d_alpha, d_beta, d_M, reg, n, m, write_values_and_indices,
+        d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
+    );
 
-        // Step 3: Compute objfn and grad
-        dim3 threadsPerBlock(BLOCK_DIM);
-        dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
-        obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
-            d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
-            reg, n, m,
-            d_objfn, d_grad
-        );
-    }
-    
-    // Stage 2 computes pointers for sparsified Hessian
-    if (stage2)
-    {
-        // Total number of T elements
-        size_t Te = n * (m - 1);
-        size_t Hsize = n + m - 1;
+    // Compute objfn and grad
+    dim3 threadsPerBlock(BLOCK_DIM);
+    dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
+        d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
+        reg, n, m,
+        d_objfn, d_grad
+    );
+}
 
-        // Bound check
-        size_t Ks = max(K, 1);
-        Ks = min(Ks, Te);
+// Helper function to compute sparse representation of H
+//
+// (continued from launch_T_computation())
+// 4. The largest K elements of (T_t)' are written into the first K elements of d_Hvalues
+// 5. The corresponding (flattened) indices are written into d_Hflatind
+// 6. Add diagonal elements of Hsl matrix (plus a shift) to d_Hvalues and corresponding indices to d_Hflatind
+//    (overwrite d_Hvalues[K:] and d_Hflatind[K:])
+// 7. The first (K+Hsize) elements in d_Hflatind are in ascending order, Hsize = n+m-1
+//
+// In: d_values     [n*(m-1)]
+// In: d_indices    [n*(m-1)]
+// Out: d_Hvalues   [nnz] = [K+Hsize], reserve [Kmax+Hsize]
+// Out: d_Hflatind  [nnz], reserve [Kmax+Hsize]
+void launch_H_sparsification(
+    const double* d_values,
+    const int* d_indices,
+    const double* d_Trowsums,
+    const double* d_Tcolsums,
+    int n, int m, int K,
+    double shift,
+    double* d_Hvalues,
+    int* d_Hflatind
+)
+{
+    // Total number of T elements
+    size_t Te = n * (m - 1);
+    size_t Hsize = n + m - 1;
 
-        // Currently we do have a good Top-K implementation,
-        // so we directly sort the T values
-        // Step 4: Call thrust::sort_by_key to sort T values
+    // Bound check
+    size_t Ks = max(K, 1);
+    Ks = min(Ks, Te);
 
-        // Wrap raw device pointers with thrust::device_ptr
-        thrust::device_ptr<double> d_values_ptr = thrust::device_pointer_cast(d_values);
-        thrust::device_ptr<int> d_indices_ptr = thrust::device_pointer_cast(d_indices);
+    // We use cub::DeviceTopK::MaxPairs to find the largest K values in d_values,
+    // and get the corresponding elements in d_indices
 
-        // Perform the in-place sorting according to T values (descending order)
-        thrust::sort_by_key(
-            d_values_ptr,
-            d_values_ptr + Te,
-            d_indices_ptr,
-            thrust::greater<double>()
-        );
+    // Get memory size for DeviceTopK
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    CUDA_CHECK(cub::DeviceTopK::MaxPairs(
+        d_temp_storage, temp_storage_bytes,
+        d_values, d_Hvalues,
+        d_indices, d_Hflatind,
+        Te, Ks
+    ));
+    // Allocate memory
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    // Run DeviceTopK
+    CUDA_CHECK(cub::DeviceTopK::MaxPairs(
+        d_temp_storage, temp_storage_bytes,
+        d_values, d_Hvalues,
+        d_indices, d_Hflatind,
+        Te, Ks
+    ));
+    // Free memory
+    CUDA_CHECK(cudaFree(d_temp_storage));
 
-        // Step 5: Add diagonal elements of Hsl to (values, indices)
-        // We no longer need values[K:] and indices[K:], so we overwrite these addresses
-        dim3 threadsPerBlock(BLOCK_DIM);
-        dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
-        write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
-            d_Trowsums, d_Tcolsums, shift, n, m, d_values + Ks, d_indices + Ks
-        );
+    // Add diagonal elements of Hsl to (d_Hvalues, d_Hflatind)
+    dim3 threadsPerBlock(BLOCK_DIM);
+    dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
+        d_Trowsums, d_Tcolsums, shift, n, m, d_Hvalues + Ks, d_Hflatind + Ks
+    );
 
-        // Step 6: Call thrust::sort_by_key on the first (K+Hsize) elements to sort indices (ascending order)
-        thrust::sort_by_key(
-            d_indices_ptr,
-            d_indices_ptr + (Ks + Hsize),
-            d_values_ptr
-        );
-    }
+    // Wrap raw device pointers with thrust::device_ptr
+    thrust::device_ptr<double> d_Hvalues_ptr = thrust::device_pointer_cast(d_Hvalues);
+    thrust::device_ptr<int> d_Hflatind_ptr = thrust::device_pointer_cast(d_Hflatind);
+
+    // Call thrust::sort_by_key to sort d_Hflatind in ascending order
+    thrust::sort_by_key(
+        d_Hflatind_ptr,
+        d_Hflatind_ptr + (Ks + Hsize),
+        d_Hvalues_ptr
+    );
 }
 
 // CUDA kernel to recompute nonzero elements according to existing sparsity pattern
 //
-// In: indices  [K+Hsize]
+// In: flatind  [K+Hsize]
 // Out: values  [K+Hsize]
 __global__ void recompute_nonzero_values_kernel(
-    const int* __restrict__ indices,
+    const int* __restrict__ flatind,
     const double* __restrict__ Trowsums, 
     const double* __restrict__ Tcolsums,
     const double* __restrict__ alpha,
@@ -532,7 +544,7 @@ __global__ void recompute_nonzero_values_kernel(
     if (idx < K + Hsize)
     {
         // Index is based on Hsl (flattened)
-        int flat_ind_Hsl = indices[idx];
+        int flat_ind_Hsl = flatind[idx];
 
         // Convert to (i, j) in Hsl
         int i = flat_ind_Hsl / Hsize;
@@ -560,88 +572,13 @@ __global__ void recompute_nonzero_values_kernel(
     }
 }
 
-// Similar to launch_T_computation(), but with the following differences:
-// 1. The first (K+Hsize) elements of d_indices contain the sparsify pattern of Hsl
-// 2. This function keeps the first (K+Hsize) elements in d_indices unchanged
-// 3. Then we need to compute the corresponding Hsl values in d_values
-void launch_T_computation_fixed_indices(
-    const double* d_gamma,
-    const double* d_M,
-    const double* d_ab,
-    double reg, double shift,
-    int n, int m, int K,
-    double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
-    double* d_objfn, double* d_grad,
-    double* d_values, int* d_indices,
-    bool stage1 = true, bool stage2 = true
-)
-{
-    // Pointer aliases
-    const double* d_alpha = d_gamma;
-    const double* d_beta = d_gamma + n;
-
-    // Stage 1 computes objective function value and gradient
-    if (stage1)
-    {
-        // Step 1: Zero out the reduction arrays
-        CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
-        CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
-        CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
-        CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
-
-        // Step 2: Launch the fused kernel
-        dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-        dim3 gridDim;
-        gridDim.x = (m + blockDim.x - 1) / blockDim.x;
-        gridDim.y = (n + blockDim.y - 1) / blockDim.y;
-
-        // At this step, we do not write to d_values and d_indices
-        constexpr bool write_T_and_indices = false;
-        T_fused_kernel<<<gridDim, blockDim>>>(
-            d_alpha, d_beta, d_M, reg, n, m, write_T_and_indices,
-            d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
-        );
-
-        // Step 3: Compute objfn and grad
-        dim3 threadsPerBlock(BLOCK_DIM);
-        dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
-        obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
-            d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
-            reg, n, m,
-            d_objfn, d_grad
-        );
-    }
-    
-    // Stage 2 computes pointers for sparsified Hessian
-    if (stage2)
-    {
-        // Total number of T elements
-        size_t Te = n * (m - 1);
-        size_t Hsize = n + m - 1;
-
-        // Bound check
-        size_t Ks = max(K, 1);
-        Ks = min(Ks, Te);
-        size_t KHsize = Ks + Hsize;
-
-        // The first (K+Hsize) elements of d_indices are already given
-        // Step 4: Write elements of Hsl to d_values
-        dim3 threadsPerBlock(BLOCK_DIM);
-        dim3 numBlocks_recompute_nonzero_values((KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
-        recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock>>>(
-            d_indices, d_Trowsums, d_Tcolsums, d_alpha, d_beta, d_M,
-            reg, shift, n, m, Ks, d_values
-        );
-    }
-}
-
 // CUDA kernel to extract column indices and count the number of elements per row
 //
-// In: indices      [nnz]
+// In: flatind      [nnz]
 // Out: colind      [nnz]
 // Out: row_counts  [cols]
 __global__ void extract_columns_and_count_kernel(
-    const int* __restrict__ indices,
+    const int* __restrict__ flatind,
     int* __restrict__ colind,
     int* __restrict__ row_counts,
     int nnz, int cols
@@ -652,7 +589,7 @@ __global__ void extract_columns_and_count_kernel(
     if (idx < nnz)
     {
         // Convert flattened index to row and column
-        int flat_idx = indices[idx];
+        int flat_idx = flatind[idx];
         int row = flat_idx / cols;
         int col = flat_idx % cols;
 
@@ -664,14 +601,14 @@ __global__ void extract_columns_and_count_kernel(
     }
 }
 
-// Helper function to convert sorted indices to CSR format
+// Helper function to convert sorted flat indices to CSR format
 //
-// In: d_indices                [nnz] = [K+Hsize] = [K+n+m-1]
+// In: d_Hflatind               [nnz] = [K+Hsize] = [K+n+m-1]
 // Out: d_colind                [nnz]
 // Out: d_rowptr                [Hsize + 1] = [n+m]
 // Working space: d_row_counts  [Hsize] = [n+m-1]
 void launch_csr_conversion(
-    const int* d_indices,
+    const int* d_Hflatind,
     int* d_colind,
     int* d_rowptr,
     int* d_row_counts,
@@ -688,7 +625,7 @@ void launch_csr_conversion(
     dim3 numBlocks((nnz + threadsPerBlock.x - 1) / threadsPerBlock.x);
 
     extract_columns_and_count_kernel<<<numBlocks, threadsPerBlock>>>(
-        d_indices, d_colind, d_row_counts, nnz, Hsize
+        d_Hflatind, d_colind, d_row_counts, nnz, Hsize
     );
 
     // Compute row pointers using inclusive sum
@@ -715,19 +652,26 @@ void launch_csr_conversion(
 // Helper function to compute objective function value objfn,
 // gradient grad, and sparsified Hessian (plus a shift) in CSR form
 //
-// In: d_gamma     [n+m]  d_gamma = (d_alpha, d_beta)
-// In: d_M         [n*m]
-// In: d_ab        [n+m]
-// Out: d_objfn    [1]
-// Out: d_grad     [Hsize] = [n+m-1]
-// Out: d_Hvalues  [nnz] = [K+Hsize] = [K+n+m-1], reserve [n*(m-1)+n+m-1]
-// Out: d_Hcolind  [nnz], reserve [Kmax+n+m-1]
-// Out: d_Hrowptr  [Hsize + 1] = [n+m]
-// Working space: d_work = (d_Trowsums, d_Tcolsums, d_Tsum), [n+m+1]
-// Working space: d_iwork = (d_indices, d_row_counts), [n*(m-1)+n+m-1] + [n+m-1] = [n*(m-1)+2*(n+m-1)]
+// In: d_gamma      [n+m]  d_gamma = (d_alpha, d_beta)
+// In: d_M          [n*m]
+// In: d_ab         [n+m]
+// Out: d_objfn     [1]
+// Out: d_grad      [Hsize] = [n+m-1]
+// Out: d_Hvalues   [nnz] = [K+Hsize], reserve [Kmax+Hsize]
+// Out: d_Hflatind  [nnz], reserve [Kmax+Hsize]
+// Out: d_Hcolind   [nnz], reserve [Kmax+Hsize]
+// Out: d_Hrowptr   [Hsize + 1] = [n+m]
+// Working space: d_work = (d_Trowsums, d_Tcolsums, d_Tsum, d_values), [n+m+1+n*(m-1)]
+// Working space: d_iwork = d_indices/d_row_counts, [max(n*(m-1), n+m-1)]
 //
 // Stage 1 computes objective function value and gradient
 // Stage 2 computes sparsified Hessian
+//
+// If fixed_indices = true, it means:
+// 1. The first (K+Hsize) elements of d_Hflatind contain the sparsify pattern of Hsl
+// 2. We keep d_Hflatind unchanged, and compute the corresponding Hsl values
+// 3. Write these Hsl values to d_Hvalues
+// 4. Continue computing d_Hcolind and d_Hrowptr
 void launch_objfn_grad_sphess(
     const double* d_gamma,
     const double* d_M,
@@ -735,52 +679,80 @@ void launch_objfn_grad_sphess(
     double reg, double shift,
     int n, int m, int K,
     double* d_objfn, double* d_grad,
-    double* d_Hvalues, int* d_Hcolind, int* d_Hrowptr,
+    double* d_Hvalues, int* d_Hflatind, int* d_Hcolind, int* d_Hrowptr,
     double* d_work, int* d_iwork,
     bool stage1 = true, bool stage2 = true,
     bool fixed_indices = false
 )
 {
-    // Dimensions
-    size_t Te = n * (m - 1);
-    size_t Hsize = n + m - 1;
-    size_t Ks = max(K, 1);
-    Ks = min(Ks, Te);
-
     // Pointer aliases
+    const double* d_alpha = d_gamma;
+    const double* d_beta = d_gamma + n;
     double* d_Trowsums = d_work;
     double* d_Tcolsums = d_work + n;
     double* d_Tsum = d_work + (n + m);
+    double* d_values = d_work + (n + m + 1);
     int* d_indices = d_iwork;
-    int* d_row_counts = d_iwork + (Te + Hsize);
 
-    if (fixed_indices)
+    if (stage1)
     {
-        launch_T_computation_fixed_indices(
-            d_gamma, d_M, d_ab,
-            reg, shift, n, m, Ks,
-            d_Trowsums, d_Tcolsums, d_Tsum,
-            d_objfn, d_grad,
-            d_Hvalues, d_indices,
-            stage1, stage2
-        );
-    }
-    else
-    {
+        // If indices are fixed, we do not need to compute
+        // d_values and d_indices in the first stage
+        bool write_values_and_indices = (!fixed_indices);
         launch_T_computation(
             d_gamma, d_M, d_ab,
-            reg, shift, n, m, Ks,
+            reg, n, m,
+            write_values_and_indices,
             d_Trowsums, d_Tcolsums, d_Tsum,
             d_objfn, d_grad,
-            d_Hvalues, d_indices,
-            stage1, stage2
+            d_values, d_indices
         );
     }
 
     if (stage2)
     {
+        // Dimensions
+        size_t Te = n * (m - 1);
+        size_t Hsize = n + m - 1;
+        size_t Ks = max(K, 1);
+        Ks = min(Ks, Te);
+        size_t KHsize = Ks + Hsize;
+
+        // Get d_Hvalues and d_Hflatind
+        if (fixed_indices)
+        {
+            // If indices are fixed, we directly recompute d_Hvalues
+            // according to d_Hflatind
+
+            // The first (K+Hsize) elements of d_Hflatind are already given
+            // Now write elements of Hsl to d_Hvalues
+            dim3 threadsPerBlock(BLOCK_DIM);
+            dim3 numBlocks_recompute_nonzero_values((KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
+            recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock>>>(
+                d_Hflatind, d_Trowsums, d_Tcolsums, d_alpha, d_beta, d_M,
+                reg, shift, n, m, Ks, d_Hvalues
+            );
+        }
+        else
+        {
+            // Otherwise, call launch_H_sparsification to get
+            // d_Hvalues and d_Hflatind
+            launch_H_sparsification(
+                d_values, d_indices,
+                d_Trowsums, d_Tcolsums,
+                n, m, Ks, shift,
+                d_Hvalues, d_Hflatind
+            );
+        }
+
+        // Finally, call launch_csr_conversion to compute
+        // d_Hcolind and d_Hrowptr
+
+        // Now d_indices is no longer used, so we can reuse
+        // d_iwork for the working space
+        int* d_row_counts = d_iwork;
         launch_csr_conversion(
-            d_indices, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
+            d_Hflatind, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
         );
     }
 }
@@ -1091,7 +1063,8 @@ void T_computation_sparsify_host(
     double *d_gamma, *d_M, *d_ab;
     double *d_Trowsums, *d_Tcolsums, *d_Tsum, *d_values;
     double *d_objfn, *d_grad;
-    int *d_indices, *d_csr_rowptr, *d_csr_colind, *d_row_counts;
+    double *d_Hvalues;
+    int *d_indices, *d_Hflatind, *d_csr_rowptr, *d_csr_colind, *d_row_counts;
 
     CUDA_CHECK(cudaMalloc(&d_gamma, (n + m) * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_M, Me * sizeof(double)));
@@ -1101,8 +1074,10 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMalloc(&d_Tsum, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_grad, Hsize * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_values, N_total * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_indices, N_total * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_values, Te * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_indices, Te * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_Hvalues, nnz * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_Hflatind, nnz * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_colind, nnz * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (Hsize + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_row_counts, Hsize * sizeof(int)));
@@ -1126,10 +1101,17 @@ void T_computation_sparsify_host(
     {
         launch_T_computation(
             d_gamma, d_M, d_ab,
-            reg, shift, n, m, Ks,
+            reg, n, m,
+            true,
             d_Trowsums, d_Tcolsums, d_Tsum,
             d_objfn, d_grad,
             d_values, d_indices
+        );
+        launch_H_sparsification(
+            d_values, d_indices,
+            d_Trowsums, d_Tcolsums,
+            n, m, Ks, shift,
+            d_Hvalues, d_Hflatind
         );
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaGetLastError());
@@ -1137,7 +1119,7 @@ void T_computation_sparsify_host(
 
     // Convert flattened elements to CSR format
     launch_csr_conversion(
-        d_indices, d_csr_colind, d_csr_rowptr, d_row_counts, Ks, n, m
+        d_Hflatind, d_csr_colind, d_csr_rowptr, d_row_counts, Ks, n, m
     );
 
     // Copy results back to host
@@ -1146,11 +1128,11 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaMemcpy(Tsum, d_Tsum, sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(objfn, d_objfn, sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(grad, d_grad, Hsize * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(values, d_values, N_total * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(indices, d_indices, N_total * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(values, d_values, Te * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(indices, d_indices, Te * sizeof(int), cudaMemcpyDeviceToHost));
 
     // Copy CSR results
-    CUDA_CHECK(cudaMemcpy(csr_val, d_values, nnz * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(csr_val, d_Hvalues, nnz * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(csr_colind, d_csr_colind, nnz * sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(csr_rowptr, d_csr_rowptr, (Hsize + 1) * sizeof(int), cudaMemcpyDeviceToHost));
 
@@ -1165,6 +1147,8 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaFree(d_grad));
     CUDA_CHECK(cudaFree(d_values));
     CUDA_CHECK(cudaFree(d_indices));
+    CUDA_CHECK(cudaFree(d_Hvalues));
+    CUDA_CHECK(cudaFree(d_Hflatind));
     CUDA_CHECK(cudaFree(d_csr_colind));
     CUDA_CHECK(cudaFree(d_csr_rowptr));
     CUDA_CHECK(cudaFree(d_row_counts));

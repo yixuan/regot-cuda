@@ -323,8 +323,8 @@ py::dict test_T_computation_sparsify(
     py::array_t<double> Trowsums = py::array_t<double>(n);
     py::array_t<double> Tcolsums = py::array_t<double>(m);
     py::array_t<double> grad = py::array_t<double>(n + m - 1);
-    py::array_t<double> values = py::array_t<double>(N_total);
-    py::array_t<int> indices = py::array_t<int>(N_total);
+    py::array_t<double> values = py::array_t<double>(Te);
+    py::array_t<int> indices = py::array_t<int>(Te);
 
     // Create CSR output arrays
     py::array_t<double> val = py::array_t<double>(nnz);
