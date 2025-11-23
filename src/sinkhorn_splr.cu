@@ -14,6 +14,7 @@
 
 // Utility functions
 #include "utils.h"
+#include "timer.h"
 
 // Linear solver
 #include "linsolve.h"
@@ -636,7 +637,7 @@ public:
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max, double shift_max, int verbose,
+    double density_max, double shift_max, int pattern_cycle, int verbose,
     const double* x0 = nullptr, double* dual = nullptr
 )
 {
@@ -652,7 +653,7 @@ void cuda_sinkhorn_splr(
     size_t Kmax = static_cast<size_t>(density_max * n * (m - 1));
     Kmax = std::max(Kmax, size_t(1));
     // pattern_cycle -- cycle length of reusing sparsity pattern
-    int pattern_cycle = 10;
+    // const int pattern_cycle = 30;
 
     // Create solver object
     SPLRSolver solver(M, a, b, reg, n, m, Kmax);
@@ -675,6 +676,8 @@ void cuda_sinkhorn_splr(
     // Main iteration
     // Initial step size
     double alpha = 1.0;
+    // Timer
+    Timer timer_inner(verbose >= 2);
     for (int iter = 0; iter < max_iter; iter++)
     {
         if (verbose >= 1)
@@ -682,6 +685,9 @@ void cuda_sinkhorn_splr(
             std::cout << "iter = " << iter << ", objval = " << objfn <<
                 ", ||grad|| = " << gnorm << std::endl;
         }
+
+        // Start timing
+        timer_inner.tic();
 
         // Convergence test
         // Also exit if objective function value is not finite
@@ -692,6 +698,7 @@ void cuda_sinkhorn_splr(
         // ys = y's, yy = y'y
         double ys, yy;
         solver.compute_low_rank(ys, yy);
+        timer_inner.toc("low_rank");
 
         // Compute search direction
         // We do not do low-rank update in the first iteration
@@ -703,6 +710,7 @@ void cuda_sinkhorn_splr(
         const bool update_pattern = (iter % pattern_cycle == (pattern_cycle - 1));
 
         solver.compute_search_direc(nnz, ys, low_rank, analyze_pattern);
+        timer_inner.toc("search_direc");
 
         // Line search will overwrite d_gamma and d_grad, so
         // save d_gamma to d_gamma_prev, and d_grad to d_grad_prev
@@ -718,6 +726,7 @@ void cuda_sinkhorn_splr(
         alpha = solver.line_search_wolfe(
             std::min(1.0, 1.5 * alpha), objfn, recompute_fg, !update_pattern
         );
+        timer_inner.toc("line_search");
 
         // Recompute the new point if needed
         if (recompute_fg)
@@ -727,6 +736,7 @@ void cuda_sinkhorn_splr(
             // Compute f and g on new point d_gamma
             solver.dual_objfn_grad_sphess(density, shift, objfn, true, false, !update_pattern);
         }
+        timer_inner.toc("grad");
 
         // Adjust density according to gnorm change
         const double gnorm_pre = gnorm;
@@ -741,12 +751,21 @@ void cuda_sinkhorn_splr(
         // Compute sphess
         shift = std::min(gnorm, shift_max);
         nnz = solver.dual_objfn_grad_sphess(density, shift, objfn, false, true, !update_pattern);
+        timer_inner.toc("sphess");
 
         if (verbose >= 2)
         {
             std::cout << "[lowrank]---------------------------------------------------" << std::endl;
             std::cout << "║ ys = " << ys << ", yy = " << yy << std::endl;
-            std::cout << "║ low_rank = " << low_rank << std::endl;
+            std::cout << "║ low_rank = " << low_rank << ", analyze = " << analyze_pattern <<
+                ", update = " << update_pattern << std::endl;
+            std::cout << "===========================================================" << std::endl;
+            std::cout << "[timing]---------------------------------------------------" << std::endl;
+            std::cout << "║ low_rank = " << timer_inner["low_rank"] <<
+                ", search_direc = " << timer_inner["search_direc"] << std::endl;
+            std::cout << "║ line_search = " << timer_inner["line_search"] << std::endl;
+            std::cout << "║ grad = " << timer_inner["grad"] <<
+                ", sphess = " << timer_inner["sphess"] << std::endl;
             std::cout << "===========================================================" << std::endl << std::endl;
         }
 
