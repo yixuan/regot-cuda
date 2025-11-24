@@ -477,6 +477,13 @@ void launch_H_sparsification(
     // We use cub::DeviceTopK::MaxPairs to find the largest K values in d_values,
     // and get the corresponding elements in d_indices
 
+    // Set required environment
+    auto requirements = cuda::execution::require(
+        cuda::execution::determinism::not_guaranteed,
+        cuda::execution::output_ordering::unsorted
+    );
+    auto env = cuda::std::execution::env{requirements};
+
     // Get memory size for DeviceTopK
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
@@ -484,7 +491,8 @@ void launch_H_sparsification(
         d_temp_storage, temp_storage_bytes,
         d_values, d_Hvalues,
         d_indices, d_Hflatind,
-        Te, Ks
+        Te, Ks,
+        env
     ));
     // Allocate memory
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
@@ -493,7 +501,8 @@ void launch_H_sparsification(
         d_temp_storage, temp_storage_bytes,
         d_values, d_Hvalues,
         d_indices, d_Hflatind,
-        Te, Ks
+        Te, Ks,
+        env
     ));
     // Free memory
     CUDA_CHECK(cudaFree(d_temp_storage));
