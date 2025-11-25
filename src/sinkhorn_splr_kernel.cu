@@ -195,6 +195,7 @@ __global__ void T_fused_kernel(
     // Indices
     int tx = threadIdx.x;
     int ty = threadIdx.y;
+    int lane_id = tx % warpSize;
     // Global row index
     int i = blockIdx.y * blockDim.y + ty;
     // Global column index
@@ -246,10 +247,10 @@ __global__ void T_fused_kernel(
     double row_partial_sum = warp_reduce_sum(T_ij);
 
     // 4. Write partial sums back to global memory
-    // The first column of threads (tx=0) writes back the row sums
+    // The warp leader (lane_id=0) writes back the row sums
     // to the global memory
     // At the same time, accumulate block row sums to block total sum
-    if (tx == 0 && i < n)
+    if (lane_id == 0 && i < n)
     {
         atomicAdd(&row_sums[i], row_partial_sum);
         atomicAdd(&s_block_sum, row_partial_sum);
