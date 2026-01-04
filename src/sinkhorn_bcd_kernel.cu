@@ -33,15 +33,16 @@ __global__ void optimal_beta_kernel(
     int n, int m
 )
 {
-    // Each block handles one column, with fixed block size (e.g., 256)
-    int j = blockIdx.x;
+    extern __shared__ double shared_data[];
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    // Grid stride (number of blocks)
+    int stride = gridDim.x;
 
-    if (j < m)
+    // Grid-stride loop instead of `if (j < m)`
+    // Each block processes multiple columns
+    for (int j = blockIdx.x; j < m; j += stride)
     {
-        extern __shared__ double shared_data[];
-        int tid = threadIdx.x;
-        int block_size = blockDim.x;
-
         // First pass: find maximum in column j
         double local_max = -INFINITY;
 
@@ -112,15 +113,16 @@ __global__ void optimal_alpha_kernel(
     int n, int m
 )
 {
-    // Each block handles one row, with fixed block size (e.g., 256)
-    int i = blockIdx.x;  // Each block handles one row
+    extern __shared__ double shared_data[];
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    // Grid stride (number of blocks)
+    int stride = gridDim.x;
 
-    if (i < n)
+    // Grid-stride loop instead of `if (i < n)`
+    // Each block processes multiple rows
+    for (int i = blockIdx.x; i < n; i += stride)
     {
-        extern __shared__ double shared_data[];
-        int tid = threadIdx.x;
-        int block_size = blockDim.x;
-
         // First pass: find maximum in row i
         double local_max = -INFINITY;
 
@@ -191,10 +193,10 @@ __global__ void compute_marginal_a_kernel(
     int n, int m
 )
 {
-    // Row index
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (i < n)
+    // Grid-stride loop instead of `if (i < n)`
+    // Each thread processes multiple rows
+    int stride = gridDim.x * blockDim.x;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
     {
         double sum = 0.0;
         const double alpha_i = alpha[i];
@@ -218,10 +220,10 @@ __global__ void compute_marginal_b_kernel(
     int n, int m
 )
 {
-    // Column index
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (j < m)
+    // Grid-stride loop instead of `if (j < m)`
+    // Each thread processes multiple columns
+    int stride = gridDim.x * blockDim.x;
+    for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < m; j += stride)
     {
         double sum = 0.0;
         const double beta_j = beta[j];
@@ -303,11 +305,11 @@ void cuda_sinkhorn_bcd(
 
     // Configure kernel launch parameters
     dim3 threadsPerBlock(BLOCK_DIM);
-    // Now each block handles one row/column, so we need n blocks for alpha and m blocks for beta
-    // One block per row
-    dim3 numBlocks_alpha(n);
-    // One block per column
-    dim3 numBlocks_beta(m);
+    // Limit number of blocks to 1024 to avoid excessive kernel launch overhead
+    // Each block will process multiple rows/columns via the
+    // grid-stride loop in optimal_alpha_kernel()/optimal_beta_kernel()
+    dim3 numBlocks_alpha(std::min(n, 1024));
+    dim3 numBlocks_beta(std::min(m, 1024));
 
     // Calculate shared memory size for each kernel (for reduction operations)
     size_t sharedMemory_alpha = threadsPerBlock.x * sizeof(double);  // For reduction in optimal_alpha_kernel
@@ -351,7 +353,11 @@ void cuda_sinkhorn_bcd(
             // So we use ||a_tilde - a|| as the convergence criterion,
             // where a_tilde=rowsum(P)
             // Compute a_tilde based on current alpha and beta
-            compute_marginal_a_kernel<<<numBlocks_alpha, threadsPerBlock>>>(
+            int numBlocks_marginal_a = (n + threadsPerBlock.x - 1) / threadsPerBlock.x;
+            // Limit number of blocks to 256
+            // The grid-stride loop in compute_marginal_a_kernel() will handle larger sizes
+            numBlocks_marginal_a = std::min(numBlocks_marginal_a, 256);
+            compute_marginal_a_kernel<<<numBlocks_marginal_a, threadsPerBlock>>>(
                 d_M, d_alpha, d_beta, d_marginal, reg, n, m
             );
 
