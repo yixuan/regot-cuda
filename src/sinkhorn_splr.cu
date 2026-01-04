@@ -615,9 +615,11 @@ public:
         // d_work is no longer used, and it has at least n*m elements
         // So we use d_work to hold transport plan
         dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-        dim3 gridDim;
-        gridDim.x = (m_m + blockDim.x - 1) / blockDim.x;
-        gridDim.y = (m_n + blockDim.y - 1) / blockDim.y;
+        int gridDim_x = (m_m + blockDim.x - 1) / blockDim.x;
+        gridDim_x = std::min(gridDim_x, 32);
+        int gridDim_y = (m_n + blockDim.y - 1) / blockDim.y;
+        gridDim_y = std::min(gridDim_y, 32);
+        dim3 gridDim(gridDim_x, gridDim_y);
         double* d_P = d_work;
         compute_transport_plan_kernel<<<gridDim, blockDim>>>(
             d_M, d_alpha, d_beta, d_P, m_reg, m_n, m_m

@@ -247,12 +247,16 @@ __global__ void compute_transport_plan_kernel(
     int n, int m
 )
 {
-    int i = blockIdx.y * blockDim.y + threadIdx.y;
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    // Grid-stride loop instead of `if (i < n && j < m)` for 2D grid
+    int stride_i = gridDim.y * blockDim.y;
+    int stride_j = gridDim.x * blockDim.x;
 
-    if (i < n && j < m)
+    for (int i = blockIdx.y * blockDim.y + threadIdx.y; i < n; i += stride_i)
     {
-        P[i * m + j] = exp((alpha[i] + beta[j] - M[i * m + j]) / reg);
+        for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < m; j += stride_j)
+        {
+            P[i * m + j] = exp((alpha[i] + beta[j] - M[i * m + j]) / reg);
+        }
     }
 }
 
@@ -375,9 +379,11 @@ void cuda_sinkhorn_bcd(
 
     // Compute final transport plan
     dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    dim3 gridDim;
-    gridDim.x = (m + blockDim.x - 1) / blockDim.x;
-    gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+    int gridDim_x = (m + blockDim.x - 1) / blockDim.x;
+    gridDim_x = std::min(gridDim_x, 32);
+    int gridDim_y = (n + blockDim.y - 1) / blockDim.y;
+    gridDim_y = std::min(gridDim_y, 32);
+    dim3 gridDim(gridDim_x, gridDim_y);
     compute_transport_plan_kernel<<<gridDim, blockDim>>>(
         d_M, d_alpha, d_beta, d_P, reg, n, m
     );
