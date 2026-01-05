@@ -393,10 +393,10 @@ __global__ void obj_grad_kernel(
 // Out: values   [n+m-1]
 // OUt: indices  [n+m-1]
 __global__ void write_diagonal_kernel(
-    const double* __restrict__ Trowsums, 
+    const double* __restrict__ Trowsums,
     const double* __restrict__ Tcolsums,
     double shift,
-    int n, 
+    int n,
     int m,
     double* __restrict__ values,
     int* __restrict__ indices
@@ -404,7 +404,8 @@ __global__ void write_diagonal_kernel(
 {
     // Indices
     int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
+    int start = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
 
     // Write Trowsums[0...(n-1)] + shift to values[0...(n-1)]
     // Write i * (N + 1), i=0, ..., n-1 to indices[0...(n-1)]
@@ -412,7 +413,9 @@ __global__ void write_diagonal_kernel(
     // Write Tcolsums[0...(m-2)] + shift to (values+n)[0...(m-2)]
     // Write (n + j) * (N + 1), j=0, ..., m-2 to (indices+n)[0...(m-2)]
     int Hsize = n + m - 1;
-    if (idx < Hsize)
+
+    // Grid-stride loop instead of `if (idx < Hsize)`
+    for (int idx = start; idx < Hsize; idx += stride)
     {
         values[idx] = (idx < n) ? (Trowsums[idx] + shift) : (Tcolsums[idx - n] + shift);
         indices[idx] = idx * (Hsize + 1);
@@ -586,7 +589,7 @@ void launch_H_sparsification(
 // Out: values  [K+Hsize]
 __global__ void recompute_nonzero_values_kernel(
     const int* __restrict__ flatind,
-    const double* __restrict__ Trowsums, 
+    const double* __restrict__ Trowsums,
     const double* __restrict__ Tcolsums,
     const double* __restrict__ alpha,
     const double* __restrict__ beta,
@@ -601,10 +604,14 @@ __global__ void recompute_nonzero_values_kernel(
 {
     // Indices
     int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
+    int start = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
 
     int Hsize = n + m - 1;
-    if (idx < K + Hsize)
+    int total_len = K + Hsize;
+
+    // Grid-stride loop instead of `if (idx < K + Hsize)`
+    for (int idx = start; idx < total_len; idx += stride)
     {
         // Index is based on Hsl (flattened)
         int flat_ind_Hsl = flatind[idx];
@@ -647,9 +654,13 @@ __global__ void extract_columns_and_count_kernel(
     int nnz, int cols
 )
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Indices
+    int tid = threadIdx.x;
+    int start = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
 
-    if (idx < nnz)
+    // Grid-stride loop instead of `if (idx < nnz)`
+    for (int idx = start; idx < nnz; idx += stride)
     {
         // Convert flattened index to row and column
         int flat_idx = flatind[idx];
