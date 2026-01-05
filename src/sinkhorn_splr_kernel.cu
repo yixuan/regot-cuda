@@ -183,6 +183,17 @@ __global__ void T_fused_kernel(
     int* __restrict__ flat_indices
 )
 {
+    // Overall structure:
+    // 1. We use a number of fixed-sized thread blocks to cover
+    //    the whole M/T matrix.
+    // 2. Each thread block is of size BLOCK_DIM_X * BLOCK_DIM_Y.
+    // 3. We allocate a grid of blocks for parallel processing.
+    // 4. On the x direction (column), the grid contains (m/BLOCK_DIM_X)
+    //    blocks, so the grid has the same number of columns as M/T.
+    // 5. On the y direction (row), the grid contains gridDim.y blocks,
+    //    which can be an arbitrary number. This means that we will do
+    //    grid-stride loop on the y direction.
+
     // Shared memory for partial column sums
     // Each block contains an array of size BLOCK_DIM_X
     // s_col_sum[tx] collects the sum of the tx-th
@@ -196,10 +207,11 @@ __global__ void T_fused_kernel(
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     int lane_id = tx % warpSize;
-    // Global row index
-    int i = blockIdx.y * blockDim.y + ty;
     // Global column index
     int j = blockIdx.x * blockDim.x + tx;
+    // Grid-stride loop on i
+    int start_i = blockIdx.y * blockDim.y + ty;
+    int stride_i = gridDim.y * blockDim.y;
 
     // Initialize shared memory
     // Only one thread per column needs to do this
@@ -214,58 +226,82 @@ __global__ void T_fused_kernel(
     }
     __syncthreads();
 
-    // Boundary check and computation
-    double T_ij = 0.0;
-    if (i < n && j < m)
+    // This variable collects T_ij values on different strides
+    double Tij_stride_sum = 0.0;
+    // Grid-stride loop on i, with boundary check on j
+    for (int i = start_i; i < n; i += stride_i)
     {
-        // Flattened index reading M[i, j]
-        int flat_idx_M = i * m + j;
-        // We read T_t by row, and write to T_out [n*(m-1)]
-        // T_t[i, j] -> T_out[i * (m-1) + j]
-        int flat_idx_T_out = flat_idx_M - i;  // == i * (m - 1) + j;
-        // Index of T_t[i, j] in flattened Hsl matrix
-        int flat_idx_Hsl = (n + j) * (n + m - 1) + i;
+        // Default to be zero, so that padding threads can
+        // join reduction but do not affect the result
+        double T_ij = 0.0;
 
-        // 1. Compute T[i, j]
-        T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
-
-        // 2. Fill flat_indices and T_out only when j < m-1,
-        //    excluding the last row of T' (last column of T)
-        if (write_values_and_indices && j < m - 1)
+        if (j < m)
         {
-            flat_indices[flat_idx_T_out] = flat_idx_Hsl;
-            T_out[flat_idx_T_out] = T_ij;
+            // Flattened index reading M[i, j]
+            int flat_idx_M = i * m + j;
+            // We read T_t by row, and write to T_out [n*(m-1)]
+            // T_t[i, j] -> T_out[i * (m-1) + j]
+            int flat_idx_T_out = flat_idx_M - i;  // == i * (m - 1) + j;
+            // Index of T_t[i, j] in flattened Hsl matrix
+            int flat_idx_Hsl = (n + j) * (n + m - 1) + i;
+
+            // 1. Compute T[i, j]
+            T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
+
+            // 2. Fill flat_indices and T_out only when j < m-1,
+            //    excluding the last row of T' (last column of T)
+            if (write_values_and_indices && j < m - 1)
+            {
+                flat_indices[flat_idx_T_out] = flat_idx_Hsl;
+                T_out[flat_idx_T_out] = T_ij;
+            }
+
+            // 3. Accumulate T_ij values across strides
+            Tij_stride_sum += T_ij;
         }
 
-        // 3. Accumulate to shared memory (should be fast)
-        //    (The sums include all the original elements)
-        atomicAdd(&s_col_sum[tx], T_ij);
+        // Fast reduction within the warp
+        double warp_row_sum = warp_reduce_sum(T_ij);
+
+        // 4. Write warp partial sums back to global memory
+        // The warp leader (lane_id=0) writes back the row sums
+        // to the global memory
+        // Note that we allow multiple warps in each row of the block,
+        // since BLOCK_DIM_X can be a multiple of warpSize
+        if (lane_id == 0)
+        {
+            atomicAdd(&row_sums[i], warp_row_sum);
+        }
     }
 
-    // Fast reduction within the warp, which is exactly
-    // one row in the block
-    double row_partial_sum = warp_reduce_sum(T_ij);
+    // 5. Accumulate Tij_stride_sum to shared memory
+    //    Multiple rows within the block (with different ty)
+    //    will visit the same s_col_sum[tx], but it should be fast
+    atomicAdd(&s_col_sum[tx], Tij_stride_sum);
 
-    // 4. Write partial sums back to global memory
-    // The warp leader (lane_id=0) writes back the row sums
-    // to the global memory
-    // At the same time, accumulate block row sums to block total sum
-    if (lane_id == 0 && i < n)
-    {
-        atomicAdd(&row_sums[i], row_partial_sum);
-        atomicAdd(&s_block_sum, row_partial_sum);
-    }
-    // Make sure s_col_sum and s_block_sum have finished
+    // Make sure s_col_sum has finished
     __syncthreads();
 
-    // The first row of threads (ty=0) writes back the column sums
-    // to the global memory
+    // 6. Write column sums within the block to the global memory
+    // The first row of threads (ty=0) in each block does this
+    // Different blocks on the y direction will visit the same col_sums[j]
     if (ty == 0 && j < m)
     {
         atomicAdd(&col_sums[j], s_col_sum[tx]);
     }
-    // Write back the block's partial sum
-    // Only one thread per block does this
+
+    // 7. Compute block total sum
+    //    First compute warp sums, and then aggregate warp sums to block sum
+    double warp_row_stride_sum = warp_reduce_sum(Tij_stride_sum);
+    if (lane_id == 0)
+    {
+        atomicAdd(&s_block_sum, warp_row_stride_sum);
+    }
+
+    // Make sure s_block_sum has finished
+    __syncthreads();
+
+    // 8. Write block total sum to global memory
     if (tx == 0 && ty == 0)
     {
         atomicAdd(total_sum, s_block_sum);
@@ -422,12 +458,29 @@ void launch_T_computation(
     CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
     CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
 
-    // Launch the fused kernel
+    // Compute dimensions
     dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
     dim3 gridDim;
     gridDim.x = (m + blockDim.x - 1) / blockDim.x;
     gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+    // The grid must cover all the columns, meaning that gridDim.x
+    // must be m/BLOCK_DIM_X. But gridDim.y can be arbitrary, since
+    // a grid-stride loop is implemented on the y direction
+    // Then we use heuristics to adjust the total number of blocks
+    //
+    // Get the number of streaming multiprocessors (SMs)
+    int num_sms = 0;
+    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
+    // To avoid abnormal cases
+    num_sms = std::max(num_sms, 10);
+    // Target total number of blocks
+    int target_num_blocks = 32 * num_sms;
+    // Adjust gridDim.y according to gridDim.x
+    int ymax = target_num_blocks / (int)(gridDim.x);
+    ymax = std::max(ymax, 1);
+    gridDim.y = std::min((int)(gridDim.y), ymax);
 
+    // Launch the fused kernel
     T_fused_kernel<<<gridDim, blockDim>>>(
         d_alpha, d_beta, d_M, reg, n, m, write_values_and_indices,
         d_Trowsums, d_Tcolsums, d_Tsum, d_values, d_indices
