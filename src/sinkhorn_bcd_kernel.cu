@@ -309,11 +309,14 @@ void cuda_sinkhorn_bcd(
 
     // Configure kernel launch parameters
     dim3 threadsPerBlock(BLOCK_DIM);
-    // Limit number of blocks to 1024 to avoid excessive kernel launch overhead
+    // Use heuristics to set the total number of blocks
+    // Target total number of blocks
+    int target_num_blocks = heuristic_num_blocks();
+    // Limit number of blocks to target_num_blocks to avoid excessive kernel launch overhead
     // Each block will process multiple rows/columns via the
     // grid-stride loop in optimal_alpha_kernel()/optimal_beta_kernel()
-    dim3 numBlocks_alpha(std::min(n, 1024));
-    dim3 numBlocks_beta(std::min(m, 1024));
+    dim3 numBlocks_alpha(std::min(n, target_num_blocks));
+    dim3 numBlocks_beta(std::min(m, target_num_blocks));
 
     // Calculate shared memory size for each kernel (for reduction operations)
     size_t sharedMemory_alpha = threadsPerBlock.x * sizeof(double);  // For reduction in optimal_alpha_kernel
@@ -380,9 +383,12 @@ void cuda_sinkhorn_bcd(
     // Compute final transport plan
     dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
     int gridDim_x = (m + blockDim.x - 1) / blockDim.x;
-    gridDim_x = std::min(gridDim_x, 32);
     int gridDim_y = (n + blockDim.y - 1) / blockDim.y;
-    gridDim_y = std::min(gridDim_y, 32);
+    // Limit number of blocks
+    // The grid-stride loop in compute_transport_plan_kernel()
+    // will handle larger sizes
+    gridDim_x = std::min(gridDim_x, 64);
+    gridDim_y = std::min(gridDim_y, 64);
     dim3 gridDim(gridDim_x, gridDim_y);
     compute_transport_plan_kernel<<<gridDim, blockDim>>>(
         d_M, d_alpha, d_beta, d_P, reg, n, m

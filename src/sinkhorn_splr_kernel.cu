@@ -12,6 +12,9 @@
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
 
+// Utility functions
+#include "utils.h"
+
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
     do { \
@@ -470,18 +473,7 @@ void launch_T_computation(
     // must be m/BLOCK_DIM_X. But gridDim.y can be arbitrary, since
     // a grid-stride loop is implemented on the y direction
     // Then we use heuristics to adjust the total number of blocks
-    //
-    // Get the number of streaming multiprocessors (SMs)
-    int num_sms = 0;
-    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
-    // To avoid abnormal cases
-    num_sms = std::max(num_sms, 10);
-    // Target total number of blocks
-    int target_num_blocks = 32 * num_sms;
-    // Adjust gridDim.y according to gridDim.x
-    int ymax = target_num_blocks / (int)(gridDim.x);
-    ymax = std::max(ymax, 1);
-    gridDim.y = std::min((int)(gridDim.y), ymax);
+    gridDim.y = heuristic_num_blocks(gridDim.x, gridDim.y);
 
     // Launch the fused kernel
     T_fused_kernel<<<gridDim, blockDim>>>(
@@ -697,6 +689,10 @@ void launch_csr_conversion(
     // Extract column indices and count the number of elements per row
     dim3 threadsPerBlock(BLOCK_DIM);
     dim3 numBlocks((nnz + threadsPerBlock.x - 1) / threadsPerBlock.x);
+    // Adjust number of blocks using heuristics
+    // The grid-stride loop in extract_columns_and_count_kernel()
+    // will handle larger sizes
+    numBlocks.x = heuristic_num_blocks(numBlocks.x);
 
     extract_columns_and_count_kernel<<<numBlocks, threadsPerBlock>>>(
         d_Hflatind, d_colind, d_row_counts, nnz, Hsize
@@ -801,7 +797,12 @@ void launch_objfn_grad_sphess(
             // The first (K+Hsize) elements of d_Hflatind are already given
             // Now write elements of Hsl to d_Hvalues
             dim3 threadsPerBlock(BLOCK_DIM);
-            dim3 numBlocks_recompute_nonzero_values((KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
+            int numBlocks = (KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x;
+            // Adjust number of blocks using heuristics
+            // The grid-stride loop in recompute_nonzero_values_kernel()
+            // will handle larger sizes
+            numBlocks = heuristic_num_blocks(numBlocks);
+            dim3 numBlocks_recompute_nonzero_values(numBlocks);
             recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock>>>(
                 d_Hflatind, d_Trowsums, d_Tcolsums, d_alpha, d_beta, d_M,
                 reg, shift, n, m, Ks, d_Hvalues
@@ -939,8 +940,7 @@ void launch_low_rank(
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
     // Limit number of blocks to 256
-    // The grid-stride loop in low_rank_fused_kernel()
-    // will handle larger sizes
+    // The grid-stride loop in low_rank_fused_kernel() will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
     low_rank_fused_kernel<<<numBlocks, threadsPerBlock>>>(
         d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, d_ys, d_yy, size
@@ -1081,8 +1081,7 @@ void launch_low_rank_search_direc(
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
     // Limit number of blocks to 256
-    // The grid-stride loop in search_direc_dot_kernel()
-    // will handle larger sizes
+    // The grid-stride loop in search_direc_dot_kernel() will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
     search_direc_dot_kernel<<<numBlocks, threadsPerBlock>>>(
         d_s, d_g, d_y, d_invA_y, d_direc, 

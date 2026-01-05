@@ -273,8 +273,8 @@ public:
             // Optimal alpha given beta
             // Configure kernel launch parameters
             dim3 threadsPerBlock(BLOCK_DIM);
-            // Now each block handles one row, so we need n blocks for alpha
-            dim3 numBlocks_alpha(m_n);
+            // Use heuristics to set the total number of blocks
+            dim3 numBlocks_alpha(heuristic_num_blocks(m_n));
             // Calculate shared memory size
             size_t sharedMemory_alpha = threadsPerBlock.x * sizeof(double);
             // Optimal alpha given beta
@@ -616,9 +616,12 @@ public:
         // So we use d_work to hold transport plan
         dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
         int gridDim_x = (m_m + blockDim.x - 1) / blockDim.x;
-        gridDim_x = std::min(gridDim_x, 32);
         int gridDim_y = (m_n + blockDim.y - 1) / blockDim.y;
-        gridDim_y = std::min(gridDim_y, 32);
+        // Limit number of blocks
+        // The grid-stride loop in compute_transport_plan_kernel()
+        // will handle larger sizes
+        gridDim_x = std::min(gridDim_x, 64);
+        gridDim_y = std::min(gridDim_y, 64);
         dim3 gridDim(gridDim_x, gridDim_y);
         double* d_P = d_work;
         compute_transport_plan_kernel<<<gridDim, blockDim>>>(

@@ -7,9 +7,46 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+// Vector functions
 double compute_l2_distance_cuda(double* d_vec1, double* d_vec2, int size);
 double compute_l2_norm_cuda(double* d_vec, int size);
 void compute_log_vector_cuda(const double* d_x, double* d_logx, int size);
+
+
+
+// Use heuristics to set the total number of blocks
+inline int heuristic_num_blocks()
+{
+    // Get the number of streaming multiprocessors (SMs)
+    int num_sms = 0;
+    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
+    // To avoid abnormal cases
+    num_sms = std::max(num_sms, 10);
+    // Target total number of blocks
+    int target_num_blocks = 32 * num_sms;
+    return target_num_blocks;
+}
+
+// Adjust number of blocks using heuristics
+inline int heuristic_num_blocks(int init_num_blocks)
+{
+    // Target total number of blocks
+    int target_num_blocks = heuristic_num_blocks();
+    // Limit number of blocks to target_num_blocks to avoid
+    // excessive kernel launch overhead
+    return std::min(init_num_blocks, target_num_blocks);
+}
+
+// Adjust y-dimension with fixed x-dimension
+inline int heuristic_num_blocks(int fixed_x, int init_y)
+{
+    // Target total number of blocks
+    int target_num_blocks = heuristic_num_blocks();
+    // Adjust y-dim according to x-dim
+    int ymax = target_num_blocks / fixed_x;
+    ymax = std::max(ymax, 1);
+    return std::min(init_y, ymax);
+}
 
 
 
