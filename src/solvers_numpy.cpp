@@ -175,8 +175,9 @@ py::dict sinkhorn_splr(
     }
 
     // Get density_max from kwargs
-    // Default to 0.01
-    double density_max = 0.01;
+    // Default to 10 / min(n, m)
+    double density_max = 10.0 / std::min(n, m);
+    density_max = std::min(density_max, 1.0);
     if (kwargs.contains("density"))
     {
         density_max = py::cast<double>(kwargs["density"]);
@@ -193,7 +194,7 @@ py::dict sinkhorn_splr(
     }
 
     // Get pattern_cycle from kwargs
-    int pattern_cycle = 10;
+    int pattern_cycle = 30;
     if (kwargs.contains("pattern_cycle"))
     {
         pattern_cycle = py::cast<int>(kwargs["pattern_cycle"]);
