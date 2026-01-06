@@ -1130,7 +1130,7 @@ void T_computation_sparsify_host(
 
     // Total number of elements for values and indices
     // In the extreme case, T_t plus diagonal elements of Hsl
-    size_t N_total = Te + Hsize;
+    // size_t N_total = Te + Hsize;
 
     // Allocate device memory
     double *d_gamma, *d_M, *d_ab;

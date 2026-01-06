@@ -53,22 +53,26 @@ PYBIND11_MODULE(_internal, m)
 {
     m.doc() = "CUDA-accelerated Regularized Optimal Transport (RegOT-CUDA)";
 
-    m.def("sinkhorn_bcd", &sinkhorn_bcd,
-          py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
-          py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
-          "Sinkhorn Block Coordinate Descent algorithm (CUDA implementation)");
+    // Numpy interface submodule
+    py::module m_numpy = m.def_submodule("numpy", "Numpy interface.");
+    m_numpy.def("sinkhorn_bcd", &sinkhorn_bcd,
+        py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
+        py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
+        "Sinkhorn Block Coordinate Descent algorithm (CUDA implementation)");
     
-    m.def("sinkhorn_splr", &sinkhorn_splr,
-          py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
-          py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
-          "Sinkhorn SPLR algorithm (CUDA implementation)");
+    m_numpy.def("sinkhorn_splr", &sinkhorn_splr,
+        py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
+        py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
+        "Sinkhorn SPLR algorithm (CUDA implementation)");
 
-    m.def("test_T_computation_sparsify", &test_T_computation_sparsify,
-          py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"), py::arg("shift"), py::arg("K"),
-          py::arg("nrun") = 1,
-          "Test T computation and sparsification (CUDA implementation)");
+    // Submodule for test functions
+    py::module m_tests = m.def_submodule("tests", "Test functions.");
+    m_tests.def("test_T_computation_sparsify", &test_T_computation_sparsify,
+        py::arg("alpha"), py::arg("beta"), py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"), py::arg("shift"), py::arg("K"),
+        py::arg("nrun") = 1,
+        "Test T computation and sparsification (CUDA implementation)");
 
-    m.def("test_sparse_cholesky_solve", &test_sparse_cholesky_solve,
-          py::arg("values"), py::arg("colind"), py::arg("rowptr"), py::arg("rhs"),
-          "Test sparse Cholesky solver using cuDSS (CUDA implementation)");
+    m_tests.def("test_sparse_cholesky_solve", &test_sparse_cholesky_solve,
+        py::arg("values"), py::arg("colind"), py::arg("rowptr"), py::arg("rhs"),
+        "Test sparse Cholesky solver using cuDSS (CUDA implementation)");
 }
