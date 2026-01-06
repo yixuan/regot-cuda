@@ -8,13 +8,16 @@ import subprocess
 
 __version__ = "0.1.0"
 
+# The directory that contains setup.py
+SETUP_DIRECTORY = Path(__file__).resolve().parent
+
 def find_cuda():
     """Find CUDA installation"""
     # Check common CUDA installation paths
     cuda_paths = [
         "/usr/local/cuda",
         "/opt/cuda",
-        "/usr/cuda",
+        "/usr/cuda"
     ]
 
     # Also check CUDA_HOME environment variable
@@ -24,6 +27,7 @@ def find_cuda():
 
     for path in cuda_paths:
         if os.path.exists(path):
+            print(f"CUDA path found: {path}")
             return path
 
     return None
@@ -33,7 +37,7 @@ def check_cuda_compiler():
     try:
         result = subprocess.run(["nvcc", "--version"],
                                 capture_output=True, text=True, check=True)
-        print(f"CUDA compiler found: {result.stdout.split()[3]}")
+        print(f"CUDA compiler found:\n{result.stdout}")
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
@@ -73,7 +77,7 @@ class BuildExt(build_ext):
             # Ensure CUDA libraries are linked
             if not hasattr(ext, "libraries"):
                 ext.libraries = []
-            for lib in ["cudart", "cuda", "cudss"]:
+            for lib in ["cudart", "cuda"]:
                 if lib not in ext.libraries:
                     ext.libraries.append(lib)
 
@@ -88,43 +92,47 @@ class BuildExt(build_ext):
         nvcc_cmd = ["nvcc", "-c", "-O3", "--use_fast_math", "-Xcompiler", "-fPIC"]
 
         # Add virtual environment include directory
-        nvcc_cmd.extend(["-I", os.path.join(sys.exec_prefix, "include")])
+        venv_inc_dir = os.path.join(sys.exec_prefix, "include")
+        if venv_inc_dir not in self.compiler.include_dirs:
+            nvcc_cmd.append("-I" + venv_inc_dir)
 
-        # Add include directories
+        # Add include directories specified in ext_modules
         if hasattr(ext, "include_dirs"):
             for inc_dir in ext.include_dirs:
-                nvcc_cmd.extend(["-I", inc_dir])
+                if inc_dir not in self.compiler.include_dirs:
+                    nvcc_cmd.append("-I" + inc_dir)
 
         # Add Python include directories
         for inc_dir in self.compiler.include_dirs:
-            nvcc_cmd.extend(["-I", inc_dir])
+            nvcc_cmd.append("-I" + inc_dir)
 
         # Add source and output
         nvcc_cmd.extend([cuda_file, "-o", output_file])
 
         print(f"Compiling CUDA file: {cuda_file}")
+        print(" ".join(nvcc_cmd))
+        print()
         subprocess.check_call(nvcc_cmd)
 
         return output_file
 
-# The directory that contains setup.py
-SETUP_DIRECTORY = Path(__file__).resolve().parent
-
 # Extension module configuration
 ext_modules = [
     Pybind11Extension(
-        "curegot._internal",
-        sorted(glob("src/*.cpp") + glob("src/*.cu")),
+        name="curegot._internal",
+        sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
         include_dirs=[
-            os.path.join(cuda_path, "include"),
+            "include/cccl",
+            os.path.join(cuda_path, "include")
         ],
         library_dirs=[
             os.path.join(cuda_path, "lib64"),
+            os.path.join(cuda_path, "lib")
         ],
         libraries=["cudart", "cuda", "cudss"],
         define_macros=[("VERSION_INFO", __version__)],
         extra_compile_args=["-O3"],
-        language="c++",
+        language="c++"
     )
 ]
 
@@ -140,5 +148,5 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExt},
     zip_safe=False,
-    python_requires=">=3.10",
+    python_requires=">=3.10"
 )
