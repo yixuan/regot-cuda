@@ -18,7 +18,7 @@ void T_computation_sparsify_host(
     int n, int m, int K,
     double* Trowsums, double* Tcolsums, double* Tsum,
     double* objfn, double* grad,
-    double* values, int* indices,
+    double* Tvalues, int* Tflatind,
     double* csr_val, int* csr_rowptr, int* csr_colind
 );
 
@@ -78,10 +78,6 @@ py::dict test_T_computation_sparsify(
     // Number of nonzero elements in Hsl
     size_t nnz = Ks + Hsize;
 
-    // Total number of elements for values and indices
-    // In the extreme case, T_t plus diagonal elements of Hsl
-    size_t N_total = Te + Hsize;
-
     // Get raw pointers
     const double* alpha_ptr = static_cast<const double*>(alpha_buf.ptr);
     const double* beta_ptr = static_cast<const double*>(beta_buf.ptr);
@@ -93,8 +89,8 @@ py::dict test_T_computation_sparsify(
     py::array_t<double> Trowsums = py::array_t<double>(n);
     py::array_t<double> Tcolsums = py::array_t<double>(m);
     py::array_t<double> grad = py::array_t<double>(n + m - 1);
-    py::array_t<double> values = py::array_t<double>(Te);
-    py::array_t<int> indices = py::array_t<int>(Te);
+    py::array_t<double> Tvalues = py::array_t<double>(Te);
+    py::array_t<int> Tflatind = py::array_t<int>(Te);
 
     // Create CSR output arrays
     py::array_t<double> val = py::array_t<double>(nnz);
@@ -104,8 +100,8 @@ py::dict test_T_computation_sparsify(
     py::buffer_info Trowsums_buf = Trowsums.request();
     py::buffer_info Tcolsums_buf = Tcolsums.request();
     py::buffer_info grad_buf = grad.request();
-    py::buffer_info values_buf = values.request();
-    py::buffer_info indices_buf = indices.request();
+    py::buffer_info Tvalues_buf = Tvalues.request();
+    py::buffer_info Tflatind_buf = Tflatind.request();
     py::buffer_info val_buf = val.request();
     py::buffer_info rowptr_buf = rowptr.request();
     py::buffer_info colind_buf = colind.request();
@@ -113,8 +109,8 @@ py::dict test_T_computation_sparsify(
     double* Trowsums_ptr = static_cast<double*>(Trowsums_buf.ptr);
     double* Tcolsums_ptr = static_cast<double*>(Tcolsums_buf.ptr);
     double* grad_ptr = static_cast<double*>(grad_buf.ptr);
-    double* values_ptr = static_cast<double*>(values_buf.ptr);
-    int* indices_ptr = static_cast<int*>(indices_buf.ptr);
+    double* Tvalues_ptr = static_cast<double*>(Tvalues_buf.ptr);
+    int* Tflatind_ptr = static_cast<int*>(Tflatind_buf.ptr);
     double* val_ptr = static_cast<double*>(val_buf.ptr);
     int* rowptr_ptr = static_cast<int*>(rowptr_buf.ptr);
     int* colind_ptr = static_cast<int*>(colind_buf.ptr);
@@ -124,7 +120,7 @@ py::dict test_T_computation_sparsify(
     T_computation_sparsify_host(
         nrun,
         alpha_ptr, beta_ptr, M_ptr, a_ptr, b_ptr, reg, shift, n, m, Ks,
-        Trowsums_ptr, Tcolsums_ptr, &Tsum, &objfn, grad_ptr, values_ptr, indices_ptr,
+        Trowsums_ptr, Tcolsums_ptr, &Tsum, &objfn, grad_ptr, Tvalues_ptr, Tflatind_ptr,
         val_ptr, rowptr_ptr, colind_ptr
     );
 
@@ -135,8 +131,8 @@ py::dict test_T_computation_sparsify(
     result["Tsum"] = Tsum;
     result["objfn"] = objfn;
     result["grad"] = grad;
-    result["values"] = values;
-    result["indices"] = indices;
+    result["Tvalues"] = Tvalues;
+    result["Tflatind"] = Tflatind;
 
     // Add CSR format results
     result["csr_val"] = val;
