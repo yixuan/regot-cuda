@@ -95,6 +95,7 @@ void launch_low_rank_search_direc(
     const double* d_y,
     const double* d_s,
     const double ys,
+    const double reg,
     int size
 );
 
@@ -350,16 +351,30 @@ public:
     {
         // Solve (H + UCV) * d = -g
         // U = [u, v], C = diag(a, b), V = U'
-        // u = y, v = A * s
+        // u = y, v = H * s
         // a = 1 / u's, b = -1 / v's
-
-        // Note that we have actually stored A = reg * H,
-        // so we first solve (A + UDV) * x = g,
-        // where D = diag(reg * a, reg * b), and then do
-        // the scaling d <- -reg * x
 
         // BFGS update rule
         // https://en.wikipedia.org/wiki/Broyden%E2%80%93Fletcher%E2%80%93Goldfarb%E2%80%93Shanno_algorithm
+
+        // inv(H + UCV) = inv(H) + (y's + y'inv(H)y)(ss') - inv(H)ys' + sy'inv(H)
+        //                         ----------------------   ---------------------   
+        //                                 (y's)^2                   y's
+        //
+        // Therefore,
+        // d = -inv(H + UCV)g = -inv(H)g - (y's + y'inv(H)y)(s'g)s + (s'g)inv(H)y + sy'inv(H)g
+        //                                 -----------------------   -------------------------
+        //                                         (y's)^2                      y's
+        //
+        // Let d0 = -inv(H)g
+        // If no low-rank term is used, then directly return d0
+
+        // Note that we have actually stored A = reg * H,
+        // so we first compute
+        // x = inv(A)g + (y's / reg + y'inv(A)y)(s'g)s - (s'g)inv(A)y + sy'inv(A)g
+        //               -----------------------------   -------------------------
+        //                          (y's)^2                         y's
+        // and then do the scaling d <- -reg * x
         
         // direc = invA_g = inv(A) * g;
         m_linsolver.set_A(d_Hvalues, d_Hcolind, d_Hrowptr, m_Hsize, nnz);
@@ -383,8 +398,8 @@ public:
             // sg = s'g, ys = y's
             // yinvAy = y'(invA_y), yinvAg = y'(invA_g) = y'(direc)
             // sg_ys = sg / ys
-            // direc += ((1 + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
-            launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_Hsize);
+            // direc += ((1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
+            launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_reg, m_Hsize);
         }
 
         // Scaling d <- -reg * x
@@ -673,13 +688,15 @@ void cuda_sinkhorn_splr(
     // and sparsified Hessian (sphess)
     double objfn;
     // Only compute f and g by setting stage1 = true, stage2 = false
-    solver.dual_objfn_grad_sphess(density, shift, objfn, true, false);
+    // Note: shift should be applied to Hessian, but what we compute is Hsl = H * reg
+    // Therefore, here we multiply shift by reg before adding to Hsl
+    solver.dual_objfn_grad_sphess(density, shift * reg, objfn, true, false);
     // Now we can compute ||grad||, which will be used for updating shift
     double gnorm = solver.grad_norm();
     double gnorm_init = gnorm;
     shift = std::min(gnorm, shift_max);
     // Then continue computing sphess by setting stage1 = false, stage2 = true
-    size_t nnz = solver.dual_objfn_grad_sphess(density, shift, objfn, false, true);
+    size_t nnz = solver.dual_objfn_grad_sphess(density, shift * reg, objfn, false, true);
 
     // Main iteration
     // Initial step size
@@ -742,7 +759,7 @@ void cuda_sinkhorn_splr(
             // d_gamma = d_gamma_prev + alpha * direc
             solver.update_gamma(alpha);
             // Compute f and g on new point d_gamma
-            solver.dual_objfn_grad_sphess(density, shift, objfn, true, false, !update_pattern);
+            solver.dual_objfn_grad_sphess(density, shift * reg, objfn, true, false, !update_pattern);
         }
         timer_inner.toc("grad");
 
@@ -758,7 +775,7 @@ void cuda_sinkhorn_splr(
 
         // Compute sphess
         shift = std::min(gnorm, shift_max);
-        nnz = solver.dual_objfn_grad_sphess(density, shift, objfn, false, true, !update_pattern);
+        nnz = solver.dual_objfn_grad_sphess(density, shift * reg, objfn, false, true, !update_pattern);
         timer_inner.toc("sphess");
 
         if (verbose >= 2)

@@ -1006,6 +1006,7 @@ __global__ void update_direc_kernel(
     const double* __restrict__ s,
     const double* __restrict__ d_scalars,  // sg, yinvAy, yinvAg
     double ys,
+    double reg,
     int size
 )
 {
@@ -1027,9 +1028,9 @@ __global__ void update_direc_kernel(
         double sg_ys = sg / ys;
 
         // direc += term1 * s - term2 * invA_y
-        // term1 = (1 + yinvAy / ys) * sg_ys - yinvAg / ys
+        // term1 = (1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys
         // term2 = sg_ys
-        double term1 = (1.0 + yinvAy / ys) * sg_ys - yinvAg / ys;
+        double term1 = (1.0 / reg + yinvAy / ys) * sg_ys - yinvAg / ys;
         
         common_term1 = term1;
         common_term2 = sg_ys;
@@ -1053,7 +1054,7 @@ __global__ void update_direc_kernel(
 // 2. yinvAy = sum(y * invA_y)
 // 3. yinvAg = sum(y * invA_g), invA_g is an alias of direc
 // 4. sg_ys = sg / ys
-// 5. direc += ((1 + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
+// 5. direc += ((1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
 //
 // In/Out: d_direc  [size]
 // In: d_invA_y     [size]
@@ -1067,6 +1068,7 @@ void launch_low_rank_search_direc(
     const double* d_y,
     const double* d_s,
     const double ys,
+    const double reg,
     int size
 )
 {
@@ -1091,7 +1093,7 @@ void launch_low_rank_search_direc(
     // Call second kernel function
     update_direc_kernel<<<numBlocks, threadsPerBlock>>>(
         d_direc, d_invA_y, d_s, 
-        d_work, ys, size
+        d_work, ys, reg, size
     );
 
     // Free workspace
