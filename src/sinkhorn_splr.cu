@@ -215,6 +215,49 @@ public:
         CUDA_CHECK(cudaFree(d_iwork));
     }
 
+    // Sinkhorn iteration to update alpha
+    // Note that this function should not be called frequently,
+    // since we temporarily compute the log(a) vector
+    void update_alpha()
+    {
+        // Compute log(a) vector
+        double* d_loga;
+        CUDA_CHECK(cudaMalloc(&d_loga, m_n * sizeof(double)));
+
+        // Compute log(a) on device
+        compute_log_vector_cuda(d_ab, d_loga, m_n);
+
+        // Optimal alpha given beta
+        // d_alpha = d_gamma
+        // d_beta = d_gamma + n
+        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha, m_reg, m_n, m_m);
+
+        // Free log(a) vector
+        CUDA_CHECK(cudaFree(d_loga));
+    }
+
+    // Sinkhorn iteration to update beta
+    // Note that this function should not be called frequently,
+    // since we temporarily compute the log(b) vector
+    void update_beta()
+    {
+        // Compute log(b) vector
+        double* d_logb;
+        CUDA_CHECK(cudaMalloc(&d_logb, m_m * sizeof(double)));
+
+        // Compute log(b) on device
+        double* d_b = d_ab + m_n;
+        compute_log_vector_cuda(d_b, d_logb, m_m);
+
+        // Optimal beta given alpha
+        // d_alpha = d_gamma
+        // d_beta = d_gamma + n
+        compute_optimal_beta(d_M, d_alpha, d_logb, d_beta, m_reg, m_n, m_m);
+
+        // Free log(b) vector
+        CUDA_CHECK(cudaFree(d_logb));
+    }
+
     // Initialize dual variables
     void init_dual(const double* x0)
     {
@@ -242,21 +285,7 @@ public:
             // If no initial values are provided, first set beta to zero,
             // and then compute alpha using BCD iteration
             CUDA_CHECK(cudaMemset(d_beta, 0, m_m * sizeof(double)));
-
-            // We also need log(a) vector
-            double* d_loga;
-            CUDA_CHECK(cudaMalloc(&d_loga, m_n * sizeof(double)));
-
-            // Compute log(a) on device
-            compute_log_vector_cuda(d_ab, d_loga, m_n);
-
-            // Optimal alpha given beta
-            // d_alpha = d_gamma
-            // d_beta = d_gamma + n
-            compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha, m_reg, m_n, m_m);
-
-            // Free log(a) vector
-            CUDA_CHECK(cudaFree(d_loga));
+            update_alpha();
         }
 
         // Initialize dual variable in previous iteration
@@ -755,6 +784,10 @@ void cuda_sinkhorn_splr(
 
         *niter = iter + 1;
     }
+
+    // Final Sinkhorn iteration
+    // solver.update_beta();
+    // solver.update_alpha();
 
     // Compute final transport plan and output results to host
     solver.output_result(P, dual);
