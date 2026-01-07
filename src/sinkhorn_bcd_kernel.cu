@@ -5,6 +5,13 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+// Thrust headers
+#include <thrust/device_vector.h>
+#include <thrust/reduce.h>
+#include <thrust/transform_reduce.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/tuple.h>
+
 // Utility functions
 #include "utils.h"
 
@@ -237,6 +244,84 @@ void compute_optimal_alpha(
     );
 }
 
+// Functor to compute squared difference with a scalar shift.
+// Calculates: ((val1 - val2) + shift)^2
+struct SquaredDiffWithShift
+{
+    const double m_shift;
+
+    __host__ __device__
+    SquaredDiffWithShift(double s):
+        m_shift(s)
+    {}
+
+    __host__ __device__
+    double operator()(const thrust::tuple<double, double>& t) const
+    {
+        double val1 = thrust::get<0>(t);
+        double val2 = thrust::get<1>(t);
+        double diff = (val1 - val2) + m_shift;
+        return diff * diff;
+    }
+};
+
+// Compute difference between (alpha, beta) and (alpha_prev, beta_prev)
+// Note that (alpha, beta) is equivalent to (alpha + c * 1, beta - c * 1) for any c,
+// so we need to first standardize vectors before comparing
+// Let (alpha', beta') = (alpha + c * 1, beta - c * 1) such that sum(alpha') = sum(beta'),
+// then c = (sum(beta) - sum(alpha)) / (m + n)
+// Similarly, let (alpha_prev', beta_prev') = (alpha_prev + d * 1, beta_prev - d * 1)
+// with d = (sum(beta_prev) - sum(alpha_prev)) / (m + n)
+// Define K = c - d, then alpha' - alpha_prev' = alpha - alpha_prev + K * 1
+//                        beta' - beta_prev' = beta - beta_prev - K * 1
+double compute_iter_difference(
+    const double* d_alpha, const double* d_beta,
+    const double* d_alpha_prev, const double* d_beta_prev,
+    int n, int m
+)
+{
+    // Wrap raw pointers with thrust device pointers
+    thrust::device_ptr<const double> d_alpha_ptr(d_alpha);
+    thrust::device_ptr<const double> d_beta_ptr(d_beta);
+    thrust::device_ptr<const double> d_alpha_prev_ptr(d_alpha_prev);
+    thrust::device_ptr<const double> d_beta_prev_ptr(d_beta_prev);
+
+    // Compute sums
+    double sum_alpha = thrust::reduce(d_alpha_ptr, d_alpha_ptr + n, 0.0, thrust::plus<double>());
+    double sum_beta  = thrust::reduce(d_beta_ptr, d_beta_ptr + m, 0.0, thrust::plus<double>());
+    double sum_alpha_prev = thrust::reduce(d_alpha_prev_ptr, d_alpha_prev_ptr + n, 0.0, thrust::plus<double>());
+    double sum_beta_prev  = thrust::reduce(d_beta_prev_ptr, d_beta_prev_ptr + m, 0.0, thrust::plus<double>());
+
+    // Compupte shifts
+    double c = (sum_beta - sum_alpha) / (n + m);
+    double d = (sum_beta_prev - sum_alpha_prev) / (n + m);
+    double K = c - d;
+
+    // Compute Euclidean distances
+    // (alpha[i] - alpha_prev[i] + K)^2
+    auto alpha_iter_begin = thrust::make_zip_iterator(thrust::make_tuple(d_alpha_ptr, d_alpha_prev_ptr));
+    auto alpha_iter_end = thrust::make_zip_iterator(thrust::make_tuple(d_alpha_ptr + n, d_alpha_prev_ptr + n));
+    double alpha_diff = thrust::transform_reduce(
+        alpha_iter_begin, 
+        alpha_iter_end,
+        SquaredDiffWithShift(K),
+        0.0,
+        thrust::plus<double>()
+    );
+    // (beta[j] - beta_prev[j] - K)^2
+    auto beta_iter_begin = thrust::make_zip_iterator(thrust::make_tuple(d_beta_ptr, d_beta_prev_ptr));
+    auto beta_iter_end = thrust::make_zip_iterator(thrust::make_tuple(d_beta_ptr + m, d_beta_prev_ptr + m));
+    double beta_diff = thrust::transform_reduce(
+        beta_iter_begin,
+        beta_iter_end,
+        SquaredDiffWithShift(-K),
+        0.0,
+        thrust::plus<double>()
+    );
+
+    return std::sqrt(alpha_diff + beta_diff);
+}
+
 // CUDA kernel for computing marginal a (row sums of transport plan)
 __global__ void compute_marginal_a_kernel(
     const double* __restrict__ M,
@@ -419,11 +504,15 @@ void cuda_sinkhorn_bcd(
         // Check convergence using dual variable differences -- easier to compute
         if (!use_marginal_error)
         {
-            double alpha_diff = compute_l2_distance_cuda(d_alpha, d_alpha_prev, n);
-            double beta_diff = compute_l2_distance_cuda(d_beta, d_beta_prev, m);
-            double diff_error = std::hypot(alpha_diff, beta_diff);
+            // double alpha_diff = compute_l2_distance_cuda(d_alpha, d_alpha_prev, n);
+            // double beta_diff = compute_l2_distance_cuda(d_beta, d_beta_prev, m);
+            // double diff_error = std::hypot(alpha_diff, beta_diff);
 
-            if (diff_error < tol)
+            double diff_error = compute_iter_difference(
+                d_alpha, d_beta, d_alpha_prev, d_beta_prev, n, m
+            );
+
+            if (diff_error < tol * 10)
             {
                 use_marginal_error = true;
             }
