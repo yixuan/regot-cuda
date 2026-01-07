@@ -183,6 +183,60 @@ __global__ void optimal_alpha_kernel(
     }
 }
 
+// Helper function to compute optimal beta given alpha
+void compute_optimal_beta(
+    const double* d_M, const double* d_alpha, const double* d_logb,
+    double* d_beta, double reg, int n, int m
+)
+{
+    // Configure kernel launch parameters
+    dim3 threadsPerBlock(BLOCK_DIM);
+    // Use heuristics to set the total number of blocks
+    // Target total number of blocks
+    int target_num_blocks = heuristic_num_blocks();
+    // Limit number of blocks to target_num_blocks to avoid excessive kernel launch overhead
+    // Each block will process multiple rows/columns via the
+    // grid-stride loop in optimal_alpha_kernel()/optimal_beta_kernel()
+    // dim3 numBlocks_alpha(std::min(n, target_num_blocks));
+    dim3 numBlocks_beta(std::min(m, target_num_blocks));
+
+    // Calculate shared memory size for each kernel (for reduction operations)
+    // size_t sharedMemory_alpha = threadsPerBlock.x * sizeof(double);  // For reduction in optimal_alpha_kernel
+    size_t sharedMemory_beta = threadsPerBlock.x * sizeof(double);   // For reduction in optimal_beta_kernel
+
+    // Optimal beta given alpha
+    optimal_beta_kernel<<<numBlocks_beta, threadsPerBlock, sharedMemory_beta>>>(
+        d_M, d_alpha, d_logb, d_beta, reg, n, m
+    );
+}
+
+// Helper function to compute optimal alpha given beta
+void compute_optimal_alpha(
+    const double* d_M, const double* d_beta, const double* d_loga,
+    double* d_alpha, double reg, int n, int m
+)
+{
+    // Configure kernel launch parameters
+    dim3 threadsPerBlock(BLOCK_DIM);
+    // Use heuristics to set the total number of blocks
+    // Target total number of blocks
+    int target_num_blocks = heuristic_num_blocks();
+    // Limit number of blocks to target_num_blocks to avoid excessive kernel launch overhead
+    // Each block will process multiple rows/columns via the
+    // grid-stride loop in optimal_alpha_kernel()/optimal_beta_kernel()
+    dim3 numBlocks_alpha(std::min(n, target_num_blocks));
+    // dim3 numBlocks_beta(std::min(m, target_num_blocks));
+
+    // Calculate shared memory size for each kernel (for reduction operations)
+    size_t sharedMemory_alpha = threadsPerBlock.x * sizeof(double);  // For reduction in optimal_alpha_kernel
+    // size_t sharedMemory_beta = threadsPerBlock.x * sizeof(double);   // For reduction in optimal_beta_kernel
+
+    // Optimal alpha given beta
+    optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock, sharedMemory_alpha>>>(
+        d_M, d_beta, d_loga, d_alpha, reg, n, m
+    );
+}
+
 // CUDA kernel for computing marginal a (row sums of transport plan)
 __global__ void compute_marginal_a_kernel(
     const double* __restrict__ M,
@@ -258,6 +312,27 @@ __global__ void compute_transport_plan_kernel(
             P[i * m + j] = exp((alpha[i] + beta[j] - M[i * m + j]) / reg);
         }
     }
+}
+
+// Helper function to compute final transport plan P
+void compute_transport_plan(
+    const double* d_M, const double* d_alpha, const double* d_beta,
+    double* d_P, double reg, int n, int m
+)
+{
+    // Compute final transport plan
+    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
+    int gridDim_x = (m + blockDim.x - 1) / blockDim.x;
+    int gridDim_y = (n + blockDim.y - 1) / blockDim.y;
+    // Limit number of blocks
+    // The grid-stride loop in compute_transport_plan_kernel()
+    // will handle larger sizes
+    gridDim_x = std::min(gridDim_x, 64);
+    gridDim_y = std::min(gridDim_y, 64);
+    dim3 gridDim(gridDim_x, gridDim_y);
+    compute_transport_plan_kernel<<<gridDim, blockDim>>>(
+        d_M, d_alpha, d_beta, d_P, reg, n, m
+    );
 }
 
 // CUDA implementation of BCD algorithm for entropic-regularized OT
@@ -381,18 +456,7 @@ void cuda_sinkhorn_bcd(
     }
 
     // Compute final transport plan
-    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    int gridDim_x = (m + blockDim.x - 1) / blockDim.x;
-    int gridDim_y = (n + blockDim.y - 1) / blockDim.y;
-    // Limit number of blocks
-    // The grid-stride loop in compute_transport_plan_kernel()
-    // will handle larger sizes
-    gridDim_x = std::min(gridDim_x, 64);
-    gridDim_y = std::min(gridDim_y, 64);
-    dim3 gridDim(gridDim_x, gridDim_y);
-    compute_transport_plan_kernel<<<gridDim, blockDim>>>(
-        d_M, d_alpha, d_beta, d_P, reg, n, m
-    );
+    compute_transport_plan(d_M, d_alpha, d_beta, d_P, reg, n, m);
 
     // Copy result back to host
     CUDA_CHECK(cudaMemcpy(P, d_P, n * m * sizeof(double), cudaMemcpyDeviceToHost));

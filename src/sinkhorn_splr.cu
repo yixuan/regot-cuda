@@ -15,6 +15,7 @@
 // Utility functions
 #include "utils.h"
 #include "timer.h"
+#include "sinkhorn.h"
 
 // Linear solver
 #include "linsolve.h"
@@ -33,28 +34,6 @@
 #define BLOCK_DIM_X 16
 #define BLOCK_DIM_Y 16
 #define BLOCK_DIM 256
-
-// Kernel function to compute optimal alpha given beta
-// From sinkhorn_bcd_kernel.cu
-__global__ void optimal_alpha_kernel(
-    const double* __restrict__ M,
-    const double* __restrict__ beta,
-    const double* __restrict__ loga,
-    double* __restrict__ alpha,
-    double reg,
-    int n, int m
-);
-
-// CUDA kernel for computing final transport plan P
-// From sinkhorn_bcd_kernel.cu
-__global__ void compute_transport_plan_kernel(
-    const double* __restrict__ M,
-    const double* __restrict__ alpha,
-    const double* __restrict__ beta,
-    double* __restrict__ P,
-    double reg,
-    int n, int m
-);
 
 // Helper function to compute objective function value objfn,
 // gradient grad, and sparsified Hessian in CSR form
@@ -272,18 +251,9 @@ public:
             compute_log_vector_cuda(d_ab, d_loga, m_n);
 
             // Optimal alpha given beta
-            // Configure kernel launch parameters
-            dim3 threadsPerBlock(BLOCK_DIM);
-            // Use heuristics to set the total number of blocks
-            dim3 numBlocks_alpha(heuristic_num_blocks(m_n));
-            // Calculate shared memory size
-            size_t sharedMemory_alpha = threadsPerBlock.x * sizeof(double);
-            // Optimal alpha given beta
             // d_alpha = d_gamma
             // d_beta = d_gamma + n
-            optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock, sharedMemory_alpha>>>(
-                d_M, d_beta, d_loga, d_alpha, m_reg, m_n, m_m
-            );
+            compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha, m_reg, m_n, m_m);
 
             // Free log(a) vector
             CUDA_CHECK(cudaFree(d_loga));
@@ -629,19 +599,8 @@ public:
         // Compute final transport plan
         // d_work is no longer used, and it has at least n*m elements
         // So we use d_work to hold transport plan
-        dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-        int gridDim_x = (m_m + blockDim.x - 1) / blockDim.x;
-        int gridDim_y = (m_n + blockDim.y - 1) / blockDim.y;
-        // Limit number of blocks
-        // The grid-stride loop in compute_transport_plan_kernel()
-        // will handle larger sizes
-        gridDim_x = std::min(gridDim_x, 64);
-        gridDim_y = std::min(gridDim_y, 64);
-        dim3 gridDim(gridDim_x, gridDim_y);
         double* d_P = d_work;
-        compute_transport_plan_kernel<<<gridDim, blockDim>>>(
-            d_M, d_alpha, d_beta, d_P, m_reg, m_n, m_m
-        );
+        compute_transport_plan(d_M, d_alpha, d_beta, d_P, m_reg, m_n, m_m);
 
         // Copy result back to host
         if (P != nullptr)
@@ -742,7 +701,7 @@ void cuda_sinkhorn_splr(
         solver.save_history();
 
         // Wolfe Line Search
-        // Will overwrite d_gamma and d_grad
+        // Will overwrite d_gamma, d_objfn, and d_grad
         // If the updated recompute_fg is false, then the overwritten d_gamma
         // is the new point, and d_objfn and d_grad contain the corresponding
         // objective function value and gradient, respectively
