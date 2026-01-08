@@ -36,7 +36,7 @@ if TORCH_BUILD:
                 os.path.join(sys.exec_prefix, "lib")
             ],
             libraries=["cudart", "cuda", "cudss"],
-            define_macros=[("VERSION_INFO", __version__)],
+            define_macros=[("VERSION_INFO", __version__), ("TORCH_BUILD", None)],
             extra_compile_args={
                 "cxx": ["-O3"],
                 "nvcc": ["-O3", "--use_fast_math"]

@@ -1,0 +1,258 @@
+// Only compile this file when PyTorch is available
+#if defined(TORCH_BUILD)
+
+#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <torch/extension.h>
+
+#include "sinkhorn.h"
+
+namespace py = pybind11;
+
+// PyTorch interface for sinkhorn_bcd function
+py::dict torch_sinkhorn_bcd(
+    torch::Tensor M,
+    torch::Tensor a,
+    torch::Tensor b,
+    double reg,
+    double tol,
+    int max_iter,
+    int verbose,
+    const py::kwargs& kwargs
+)
+{
+    // Check input dimensions
+    if (M.dim() != 2)
+    {
+        throw std::runtime_error("M must be a 2D tensor");
+    }
+    if (a.dim() != 1 || b.dim() != 1)
+    {
+        throw std::runtime_error("a and b must be 1D tensors");
+    }
+
+    int n = M.size(0);
+    int m = M.size(1);
+
+    if (a.size(0) != n || b.size(0) != m)
+    {
+        throw std::runtime_error("Shape mismatch: M is [n x m], a should be length n, b should be length m");
+    }
+
+    // Check data type
+    if (M.scalar_type() != torch::kFloat64 ||
+        a.scalar_type() != torch::kFloat64 ||
+        b.scalar_type() != torch::kFloat64)
+    {
+        throw std::runtime_error("Input tensors must be float64 (double)");
+    }
+
+    // Ensure contiguous and get data pointers
+    M = M.contiguous();
+    a = a.contiguous();
+    b = b.contiguous();
+
+    const double* M_ptr = M.data_ptr<double>();
+    const double* a_ptr = a.data_ptr<double>();
+    const double* b_ptr = b.data_ptr<double>();
+
+    // Handle kwargs for initial values (x0)
+    const double* x0_ptr = nullptr;
+    std::vector<double> x0_storage;
+
+    if (kwargs.contains("x0"))
+    {
+        torch::Tensor x0 = py::cast<torch::Tensor>(kwargs["x0"]);
+        if (x0.dim() != 1 || x0.size(0) != n + m)
+        {
+            throw std::runtime_error("x0 must be a 1D tensor of length n + m");
+        }
+        if (x0.scalar_type() != torch::kFloat64)
+        {
+            throw std::runtime_error("x0 must be float64 (double)");
+        }
+
+        x0 = x0.contiguous();
+        x0_storage.resize(n + m);
+        const double* x0_data = x0.data_ptr<double>();
+        std::copy(x0_data, x0_data + n + m, x0_storage.begin());
+        x0_ptr = x0_storage.data();
+    }
+
+    // Create output tensors
+    torch::Tensor P = torch::empty({n, m}, torch::kFloat64);
+    torch::Tensor dual = torch::empty(n + m, torch::kFloat64);
+
+    double* P_ptr = P.data_ptr<double>();
+    double* dual_ptr = dual.data_ptr<double>();
+
+    // Call CUDA function for BCD algorithm
+    int niter = 0;
+    cuda_sinkhorn_bcd(M_ptr, a_ptr, b_ptr, P_ptr, reg, max_iter, tol, n, m, &niter, x0_ptr, dual_ptr);
+
+    // Create result dictionary
+    py::dict result;
+    result["niter"] = niter;
+    result["plan"] = P;
+    result["dual"] = dual;
+
+    if (verbose > 0)
+    {
+        std::cout << "torch_sinkhorn_bcd (CUDA implementation) completed" << std::endl;
+        std::cout << "Input shape: [" << n << " x " << m << "]" << std::endl;
+        std::cout << "Regularization parameter: " << reg << std::endl;
+        std::cout << "Tolerance: " << tol << std::endl;
+        std::cout << "Max iterations: " << max_iter << std::endl;
+        std::cout << "Actual iterations: " << niter << std::endl;
+        if (niter == max_iter)
+        {
+            std::cout << "Warning: Maximum iterations reached without convergence" << std::endl;
+        }
+    }
+
+    return result;
+}
+
+// PyTorch interface for sinkhorn_splr function
+py::dict torch_sinkhorn_splr(
+    torch::Tensor M,
+    torch::Tensor a,
+    torch::Tensor b,
+    double reg,
+    double tol,
+    int max_iter,
+    int verbose,
+    const py::kwargs& kwargs
+)
+{
+    // Check input dimensions
+    if (M.dim() != 2)
+    {
+        throw std::runtime_error("M must be a 2D tensor");
+    }
+    if (a.dim() != 1 || b.dim() != 1)
+    {
+        throw std::runtime_error("a and b must be 1D tensors");
+    }
+
+    int n = M.size(0);
+    int m = M.size(1);
+
+    if (a.size(0) != n || b.size(0) != m)
+    {
+        throw std::runtime_error("Shape mismatch: M is [n x m], a should be length n, b should be length m");
+    }
+
+    // Check data type
+    if (M.scalar_type() != torch::kFloat64 ||
+        a.scalar_type() != torch::kFloat64 ||
+        b.scalar_type() != torch::kFloat64)
+    {
+        throw std::runtime_error("Input tensors must be float64 (double)");
+    }
+
+    // Ensure contiguous and get data pointers
+    M = M.contiguous();
+    a = a.contiguous();
+    b = b.contiguous();
+
+    const double* M_ptr = M.data_ptr<double>();
+    const double* a_ptr = a.data_ptr<double>();
+    const double* b_ptr = b.data_ptr<double>();
+
+    // Handle kwargs for initial values (x0)
+    const double* x0_ptr = nullptr;
+    std::vector<double> x0_storage;
+
+    if (kwargs.contains("x0"))
+    {
+        torch::Tensor x0 = py::cast<torch::Tensor>(kwargs["x0"]);
+        if (x0.dim() != 1 || x0.size(0) != n + m)
+        {
+            throw std::runtime_error("x0 must be a 1D tensor of length n + m");
+        }
+        if (x0.scalar_type() != torch::kFloat64)
+        {
+            throw std::runtime_error("x0 must be float64 (double)");
+        }
+
+        x0 = x0.contiguous();
+        x0_storage.resize(n + m);
+        const double* x0_data = x0.data_ptr<double>();
+        std::copy(x0_data, x0_data + n + m, x0_storage.begin());
+        x0_ptr = x0_storage.data();
+    }
+
+    // Get density_max from kwargs
+    // Default to 10 / min(n, m)
+    double density_max = 10.0 / std::min(n, m);
+    density_max = std::min(density_max, 1.0);
+    if (kwargs.contains("density"))
+    {
+        density_max = py::cast<double>(kwargs["density"]);
+        density_max = std::min(density_max, 1.0);
+        density_max = std::max(density_max, 0.0);
+    }
+
+    // Get shift_max from kwargs
+    double shift_max = 0.001;
+    if (kwargs.contains("shift"))
+    {
+        shift_max = py::cast<double>(kwargs["shift"]);
+        shift_max = std::max(shift_max, 0.0);
+    }
+
+    // Get pattern_cycle from kwargs
+    int pattern_cycle = 30;
+    if (kwargs.contains("pattern_cycle"))
+    {
+        pattern_cycle = py::cast<int>(kwargs["pattern_cycle"]);
+    }
+
+    // Create output tensors
+    torch::Tensor P = torch::empty({n, m}, torch::kFloat64);
+    torch::Tensor dual = torch::empty(n + m, torch::kFloat64);
+
+    double* P_ptr = P.data_ptr<double>();
+    double* dual_ptr = dual.data_ptr<double>();
+
+    // Call CUDA function for SPLR algorithm
+    int niter = 0;
+    cuda_sinkhorn_splr(
+        M_ptr, a_ptr, b_ptr, P_ptr,
+        reg, max_iter, tol, n, m, &niter,
+        density_max, shift_max, pattern_cycle, verbose,
+        x0_ptr, dual_ptr
+    );
+
+    // Create result dictionary
+    py::dict result;
+    result["niter"] = niter;
+    result["plan"] = P;
+    result["dual"] = dual;
+
+    if (verbose > 0)
+    {
+        std::cout << "torch_sinkhorn_splr (CUDA implementation) completed" << std::endl;
+        std::cout << "Input shape: [" << n << " x " << m << "]" << std::endl;
+        std::cout << "Regularization parameter: " << reg << std::endl;
+        std::cout << "Tolerance: " << tol << std::endl;
+        std::cout << "Max iterations: " << max_iter << std::endl;
+        std::cout << "Density max: " << density_max << std::endl;
+        std::cout << "Shift max: " << shift_max << std::endl;
+        std::cout << "Pattern cycle: " << pattern_cycle << std::endl;
+        std::cout << "Actual iterations: " << niter << std::endl;
+        if (niter == max_iter)
+        {
+            std::cout << "Warning: Maximum iterations reached without convergence" << std::endl;
+        }
+    }
+
+    return result;
+}
+
+
+#endif  // #if defined(TORCH_BUILD)

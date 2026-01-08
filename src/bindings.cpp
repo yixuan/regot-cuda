@@ -5,6 +5,23 @@
 
 namespace py = pybind11;
 
+// PyTorch interface declarations (only when PyTorch is available)
+#if defined(TORCH_BUILD)
+#include <torch/extension.h>
+
+py::dict torch_sinkhorn_bcd(
+    torch::Tensor M, torch::Tensor a, torch::Tensor b,
+    double reg, double tol, int max_iter, int verbose,
+    const py::kwargs& kwargs
+);
+
+py::dict torch_sinkhorn_splr(
+    torch::Tensor M, torch::Tensor a, torch::Tensor b,
+    double reg, double tol, int max_iter, int verbose,
+    const py::kwargs& kwargs
+);
+#endif
+
 // Main solvers
 py::dict sinkhorn_bcd(
     py::array_t<double> M,
@@ -59,11 +76,25 @@ PYBIND11_MODULE(_internal, m)
         py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
         py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
         "Sinkhorn Block Coordinate Descent algorithm (CUDA implementation)");
-    
+
     m_numpy.def("sinkhorn_splr", &sinkhorn_splr,
         py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
         py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
         "Sinkhorn SPLR algorithm (CUDA implementation)");
+
+    // PyTorch interface submodule (only when PyTorch is available)
+#if defined(TORCH_BUILD)
+    py::module m_torch = m.def_submodule("torch", "PyTorch interface.");
+    m_torch.def("sinkhorn_bcd", &torch_sinkhorn_bcd,
+        py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
+        py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
+        "Sinkhorn Block Coordinate Descent algorithm (CUDA implementation with PyTorch interface)");
+
+    m_torch.def("sinkhorn_splr", &torch_sinkhorn_splr,
+        py::arg("M"), py::arg("a"), py::arg("b"), py::arg("reg"),
+        py::arg("tol") = 1e-6, py::arg("max_iter") = 1000, py::arg("verbose") = 0,
+        "Sinkhorn SPLR algorithm (CUDA implementation with PyTorch interface)");
+#endif
 
     // Submodule for test functions
     py::module m_tests = m.def_submodule("tests", "Test functions.");
