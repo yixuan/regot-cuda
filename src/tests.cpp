@@ -6,6 +6,8 @@
 // Declares sparse_cholesky_solve_host()
 #include "linsolve.h"
 
+namespace py = pybind11;
+
 // Defined in sinkhorn_splr_kernel.cu
 void T_computation_sparsify_host(
     int nrun,
@@ -21,10 +23,6 @@ void T_computation_sparsify_host(
     double* Tvalues, int* Tflatind,
     double* csr_val, int* csr_rowptr, int* csr_colind
 );
-
-
-
-namespace py = pybind11;
 
 // Python interface for T_computation_sparsify_host function
 py::dict test_T_computation_sparsify(

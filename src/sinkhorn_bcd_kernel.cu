@@ -14,6 +14,7 @@
 
 // Utility functions
 #include "utils.h"
+#include "sinkhorn.h"
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -424,7 +425,7 @@ void compute_transport_plan(
 void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    const double* x0 = nullptr, double* dual = nullptr
+    const double* x0, double* dual
 )
 {
     // Allocate device memory

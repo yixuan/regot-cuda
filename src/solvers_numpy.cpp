@@ -1,23 +1,11 @@
 #include <iostream>
+#include <vector>
+#include <algorithm>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
-// Main solver functions
-void cuda_sinkhorn_bcd(
-    const double* M, const double* a, const double* b, double* P,
-    double reg, int max_iter, double tol, int n, int m, int* niter,
-    const double* x0 = nullptr, double* dual = nullptr
-);
-
-void cuda_sinkhorn_splr(
-    const double* M, const double* a, const double* b, double* P,
-    double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max, double shift_max, int pattern_cycle, int verbose,
-    const double* x0 = nullptr, double* dual = nullptr
-);
-
-
+#include "sinkhorn.h"
 
 namespace py = pybind11;
 

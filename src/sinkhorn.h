@@ -1,11 +1,20 @@
 #pragma once
 
-#include <iostream>
-#include <cmath>
+// Main solver functions
+void cuda_sinkhorn_bcd(
+    const double* M, const double* a, const double* b, double* P,
+    double reg, int max_iter, double tol, int n, int m, int* niter,
+    const double* x0 = nullptr, double* dual = nullptr
+);
 
-// CUDA headers
-#include <cuda_runtime.h>
-#include <device_launch_parameters.h>
+void cuda_sinkhorn_splr(
+    const double* M, const double* a, const double* b, double* P,
+    double reg, int max_iter, double tol, int n, int m, int* niter,
+    double density_max, double shift_max, int pattern_cycle, int verbose,
+    const double* x0 = nullptr, double* dual = nullptr
+);
+
+
 
 // Helper function to compute optimal beta given alpha
 void compute_optimal_beta(
