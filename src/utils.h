@@ -17,9 +17,14 @@ void compute_log_vector_cuda(const double* d_x, double* d_logx, int size);
 // Use heuristics to set the total number of blocks
 inline int heuristic_num_blocks()
 {
+    // Get the ID of the current active device
+    int device_id;
+    cudaGetDevice(&device_id);
+
     // Get the number of streaming multiprocessors (SMs)
     int num_sms = 0;
-    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
+    cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device_id);
+    // std::cout << "device_id = " << device_id << ", num_sms = " << num_sms << std::endl;
     // To avoid abnormal cases
     num_sms = std::max(num_sms, 10);
     // Target total number of blocks
