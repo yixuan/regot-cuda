@@ -97,40 +97,41 @@ class SPLRSolver
 {
 private:
     // Problem dimensions
-    const int    m_n;
-    const int    m_m;
-    const size_t m_Me;
-    const size_t m_Te;
-    const size_t m_Hsize;
-    const size_t m_Kmax;
+    const int     m_n;
+    const int     m_m;
+    const size_t  m_Me;
+    const size_t  m_Te;
+    const size_t  m_Hsize;
+    const size_t  m_Kmax;
     // Regularization parameter
-    const double m_reg;
+    const double  m_reg;
     // Input matrices and vectors on device
-    double*      d_M;
-    double*      d_ab;
+    const double* d_M;
+    double*       d_M_storage;
+    double*       d_ab;
     // Dual variables on device
-    double*      d_gamma;
-    double*      d_gamma_prev;
+    double*       d_gamma;
+    double*       d_gamma_prev;
     // Pointer aliases, d_gamma = (d_alpha, d_beta)
-    double*      d_alpha;
-    double*      d_beta;
+    double*       d_alpha;
+    double*       d_beta;
     // Objective function value and gradient
-    double*      d_objfn;
-    double*      d_grad;
-    double*      d_grad_prev;
+    double*       d_objfn;
+    double*       d_grad;
+    double*       d_grad_prev;
     // Search direction and low-rank vectors
-    double*      d_direc;
-    double*      d_y;
-    double*      d_s;
-    double*      d_invA_y;
+    double*       d_direc;
+    double*       d_y;
+    double*       d_s;
+    double*       d_invA_y;
     // Sparsified Hessian in CSR representation
-    double*      d_Hvalues;
-    int*         d_Hflatind;
-    int*         d_Hcolind;
-    int*         d_Hrowptr;
+    double*       d_Hvalues;
+    int*          d_Hflatind;
+    int*          d_Hcolind;
+    int*          d_Hrowptr;
     // Working space
-    double*      d_work;
-    int*         d_iwork;
+    double*       d_work;
+    int*          d_iwork;
     // Sparse Cholesky solver
     SparseCholeskySolver m_linsolver;
 
@@ -157,11 +158,32 @@ private:
 
 public:
     // Constructor
-    SPLRSolver(const double* M, const double* a, const double* b, double reg, int n, int m, size_t Kmax):
-        m_n(n), m_m(m), m_Me(n * m), m_Te(n * (m - 1)), m_Hsize(n + m - 1), m_Kmax(Kmax), m_reg(reg)
+    SPLRSolver(
+        const double* M, const double* a, const double* b,
+        double reg, int n, int m, size_t Kmax,
+        bool input_on_device = false
+    ):
+        m_n(n), m_m(m), m_Me(n * m), m_Te(n * (m - 1)), m_Hsize(n + m - 1), m_Kmax(Kmax), m_reg(reg),
+        d_M_storage(nullptr)
     {
+        // If M is already on the device, then directly assign M to d_M
+        // Otherwise, allocate device memory and copy from the host pointer
+        double *d_M_storage = nullptr;
+        if (input_on_device)
+        {
+            d_M = M;
+        }
+        else
+        {
+            // Allocate device memory
+            CUDA_CHECK(cudaMalloc(&d_M_storage, m_Me * sizeof(double)));
+            // Copy input to device
+            CUDA_CHECK(cudaMemcpy(d_M_storage, M, m_Me * sizeof(double), cudaMemcpyHostToDevice));
+            // Set input data pointers
+            d_M = d_M_storage;
+        }
+
         // Allocate device memory
-        CUDA_CHECK(cudaMalloc(&d_M, m_Me * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_ab, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma_prev, (m_n + m_m) * sizeof(double)));
@@ -183,10 +205,15 @@ public:
         d_alpha = d_gamma;
         d_beta = d_gamma + m_n;
 
-        // Copy input to device
-        CUDA_CHECK(cudaMemcpy(d_M, M, m_Me * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_ab, a, m_n * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_ab + m_n, b, m_m * sizeof(double), cudaMemcpyHostToDevice));
+        // Copy a and b to d_ab
+        CUDA_CHECK(cudaMemcpy(
+            d_ab, a, m_n * sizeof(double),
+            input_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice
+        ));
+        CUDA_CHECK(cudaMemcpy(
+            d_ab + m_n, b, m_m * sizeof(double),
+            input_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice
+        ));
 
         // Set d_grad_prev to zero
         CUDA_CHECK(cudaMemset(d_grad_prev, 0, m_Hsize * sizeof(double)));
@@ -196,7 +223,10 @@ public:
     ~SPLRSolver()
     {
         // Free device memory
-        CUDA_CHECK(cudaFree(d_M));
+        if (d_M_storage != nullptr)
+        {
+            CUDA_CHECK(cudaFree(d_M_storage));
+        }
         CUDA_CHECK(cudaFree(d_ab));
         CUDA_CHECK(cudaFree(d_gamma));
         CUDA_CHECK(cudaFree(d_gamma_prev));
@@ -259,7 +289,7 @@ public:
     }
 
     // Initialize dual variables
-    void init_dual(const double* x0)
+    void init_dual(const double* x0, bool input_on_device = false)
     {
         // Initialize dual variable gamma
         if (x0 != nullptr)
@@ -267,18 +297,35 @@ public:
             // Use provided initial values: x0 contains [alpha (n elements), beta (m elements)]
             // But note that we force beta[m-1]=0, so we do a shifting
             // alpha += beta[m-1], beta -= beta[m-1]
-            double* gamma0 = new double[m_n + m_m];
-            const double bm1 = x0[m_n + m_m - 1];
-            for (int i = 0; i < m_n; i++)
-            {
-                gamma0[i] = x0[i] + bm1;
-            }
-            for (int i = 0; i < m_m; i++)
-            {
-                gamma0[m_n + i] = x0[m_n + i] - bm1;
-            }
-            CUDA_CHECK(cudaMemcpy(d_gamma, gamma0, (m_n + m_m) * sizeof(double), cudaMemcpyHostToDevice));
-            delete [] gamma0;
+
+            // Copy x0 to d_gamma
+            CUDA_CHECK(cudaMemcpy(
+                d_gamma, x0, (m_n + m_m) * sizeof(double),
+                input_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice
+            ));
+            // Get shift = beta[m-1] = gamma[n+m-1]
+            double shift;
+            CUDA_CHECK(cudaMemcpy(
+                &shift, d_gamma + (m_n + m_m - 1), sizeof(double),
+                cudaMemcpyDeviceToHost
+            ));
+            // alpha += shift
+            thrust::device_ptr<double> d_gamma_ptr(d_gamma);
+            thrust::transform(
+                d_gamma_ptr,
+                d_gamma_ptr + m_n,
+                thrust::constant_iterator<double>(shift),
+                d_gamma_ptr,
+                thrust::plus<double>()
+            );
+            // beta -= shift
+            thrust::transform(
+                d_gamma_ptr + m_n,
+                d_gamma_ptr + (m_n + m_m),
+                thrust::constant_iterator<double>(shift),
+                d_gamma_ptr + m_n,
+                thrust::minus<double>()
+            );
         }
         else
         {
@@ -623,33 +670,49 @@ public:
     }
 
     // Output results to host -- transport plan and dual variables
-    void output_result(double* P, double* dual)
+    void output_result(double* P, double* dual, bool output_on_device = false)
     {
-        // Compute final transport plan
-        // d_work is no longer used, and it has at least n*m elements
-        // So we use d_work to hold transport plan
-        double* d_P = d_work;
-        compute_transport_plan(d_M, d_alpha, d_beta, d_P, m_reg, m_n, m_m);
-
-        // Copy result back to host
-        if (P != nullptr)
-        {
-            CUDA_CHECK(cudaMemcpy(P, d_P, m_Me * sizeof(double), cudaMemcpyDeviceToHost));
-        }
+        // Copy (alpha, beta) to dual
         if (dual != nullptr)
         {
-            CUDA_CHECK(cudaMemcpy(dual, d_gamma, (m_n + m_m) * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(
+                dual, d_gamma, (m_n + m_m) * sizeof(double),
+                output_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyDeviceToHost
+            ));
+        }
+
+        // In case P is nullptr
+        if (P == nullptr)
+        {
+            return;
+        }
+
+        // Compute final transport plan
+        // If P is on device, directly write to P
+        // Otherwise, since d_work is no longer used,
+        // and it has at least n*m elements, we can use d_work
+        // to hold transport plan
+        double* d_P = output_on_device ? P : d_work;
+        compute_transport_plan(d_M, d_alpha, d_beta, d_P, m_reg, m_n, m_m);
+
+        // Copy result back to host if output_on_device = false
+        if (!output_on_device)
+        {
+            CUDA_CHECK(cudaMemcpy(P, d_P, m_Me * sizeof(double), cudaMemcpyDeviceToHost));
         }
     }
 };
 
 
 // CUDA implementation of SPLR algorithm for entropic-regularized OT
+// input_on_device = true means that M, a, b, and x0 (if not nullptr) are device pointers
+// output_on_device = true means that P and dual (if not nullptr) are device pointers
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
     double density_max, double shift_max, int pattern_cycle, int verbose,
-    const double* x0, double* dual
+    const double* x0, double* dual,
+    bool input_on_device, bool output_on_device
 )
 {
     // Algorithmic parameters
@@ -667,10 +730,10 @@ void cuda_sinkhorn_splr(
     // const int pattern_cycle = 30;
 
     // Create solver object
-    SPLRSolver solver(M, a, b, reg, n, m, Kmax);
+    SPLRSolver solver(M, a, b, reg, n, m, Kmax, input_on_device);
 
     // Initialize dual variables
-    solver.init_dual(x0);
+    solver.init_dual(x0, input_on_device);
 
     // Initial objective function value (f), gradient (g),
     // and sparsified Hessian (sphess)
@@ -790,6 +853,6 @@ void cuda_sinkhorn_splr(
     // solver.update_alpha();
 
     // Compute final transport plan and output results to host
-    solver.output_result(P, dual);
+    solver.output_result(P, dual, output_on_device);
     CUDA_CHECK(cudaDeviceSynchronize());
 }

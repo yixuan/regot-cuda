@@ -161,26 +161,36 @@ py::dict torch_sinkhorn_splr(
         throw std::runtime_error("Shape mismatch: M is [n x m], a should be length n, b should be length m");
     }
 
-    // Check data type
-    if (M.scalar_type() != torch::kFloat64 ||
-        a.scalar_type() != torch::kFloat64 ||
-        b.scalar_type() != torch::kFloat64)
+    // Ensure that inputs are on GPU with a double type
+    // Zero-copy if already satisfying the conditions
+    auto src_options = M.options();
+    auto src_device = M.device();
+    // If M is already on GPU, preserve its device ID
+    // Otherwise use the default device
+    auto options = torch::TensorOptions().dtype(torch::kFloat64).device(torch::kCUDA);
+    if (src_device.is_cuda())
     {
-        throw std::runtime_error("Input tensors must be float64 (double)");
+        options = options.device(torch::kCUDA, src_device.index());
     }
+    M = M.to(options);
+    a = a.to(options);
+    b = b.to(options);
+
+    // Set active device
+    const at::cuda::CUDAGuard device_guard(options.device());
 
     // Ensure contiguous and get data pointers
     M = M.contiguous();
     a = a.contiguous();
     b = b.contiguous();
-
-    const double* M_ptr = M.data_ptr<double>();
-    const double* a_ptr = a.data_ptr<double>();
-    const double* b_ptr = b.data_ptr<double>();
+    // Pointing to device memory
+    const double* d_M_ptr = M.data_ptr<double>();
+    const double* d_a_ptr = a.data_ptr<double>();
+    const double* d_b_ptr = b.data_ptr<double>();
 
     // Handle kwargs for initial values (x0)
-    const double* x0_ptr = nullptr;
-    std::vector<double> x0_storage;
+    const double* d_x0_ptr = nullptr;
+    torch::Tensor x0_storage;
 
     if (kwargs.contains("x0"))
     {
@@ -189,16 +199,11 @@ py::dict torch_sinkhorn_splr(
         {
             throw std::runtime_error("x0 must be a 1D tensor of length n + m");
         }
-        if (x0.scalar_type() != torch::kFloat64)
-        {
-            throw std::runtime_error("x0 must be float64 (double)");
-        }
 
-        x0 = x0.contiguous();
-        x0_storage.resize(n + m);
-        const double* x0_data = x0.data_ptr<double>();
-        std::copy(x0_data, x0_data + n + m, x0_storage.begin());
-        x0_ptr = x0_storage.data();
+        // Shallow copy x0 to x0_storage if the device, type, and layout of x0 are compatible
+        // Otherwise make a conversion
+        x0_storage = x0.to(options).contiguous();
+        d_x0_ptr = x0_storage.data_ptr<double>();
     }
 
     // Get density_max from kwargs
@@ -227,21 +232,26 @@ py::dict torch_sinkhorn_splr(
         pattern_cycle = py::cast<int>(kwargs["pattern_cycle"]);
     }
 
-    // Create output tensors
-    torch::Tensor P = torch::empty({n, m}, torch::kFloat64);
-    torch::Tensor dual = torch::empty(n + m, torch::kFloat64);
-
-    double* P_ptr = P.data_ptr<double>();
-    double* dual_ptr = dual.data_ptr<double>();
+    // Create output tensors that are double and on device
+    torch::Tensor P = torch::empty({n, m}, options);
+    torch::Tensor dual = torch::empty(n + m, options);
+    // Pointing to device memory
+    double* d_P_ptr = P.data_ptr<double>();
+    double* d_dual_ptr = dual.data_ptr<double>();
 
     // Call CUDA function for SPLR algorithm
     int niter = 0;
     cuda_sinkhorn_splr(
-        M_ptr, a_ptr, b_ptr, P_ptr,
+        d_M_ptr, d_a_ptr, d_b_ptr, d_P_ptr,
         reg, max_iter, tol, n, m, &niter,
         density_max, shift_max, pattern_cycle, verbose,
-        x0_ptr, dual_ptr
+        d_x0_ptr, d_dual_ptr,
+        true, true
     );
+
+    // Convert P and dual when necessary using the input tensor options
+    P = P.to(src_options);
+    dual = dual.to(src_options);
 
     // Create result dictionary
     py::dict result;

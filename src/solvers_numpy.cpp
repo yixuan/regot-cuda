@@ -208,7 +208,8 @@ py::dict sinkhorn_splr(
         M_ptr, a_ptr, b_ptr, P_ptr,
         reg, max_iter, tol, n, m, &niter,
         density_max, shift_max, pattern_cycle, verbose,
-        x0_ptr, dual_ptr
+        x0_ptr, dual_ptr,
+        false, false
     );
 
     // Create result dictionary
