@@ -82,7 +82,8 @@ py::dict sinkhorn_bcd(
     cuda_sinkhorn_bcd(
         M_ptr, a_ptr, b_ptr, P_ptr,
         reg, max_iter, tol, n, m, &niter,
-        x0_ptr, dual_ptr
+        x0_ptr, dual_ptr,
+        false, false
     );
 
     // Create result dictionary

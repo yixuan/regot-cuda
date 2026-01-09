@@ -97,10 +97,11 @@ py::dict torch_sinkhorn_bcd(
 
     // Call CUDA function for BCD algorithm
     int niter = 0;
-    cuda_sinkhorn_bcd_device(
+    cuda_sinkhorn_bcd(
         d_M_ptr, d_a_ptr, d_b_ptr, d_P_ptr,
         reg, max_iter, tol, n, m, &niter,
-        d_x0_ptr, d_dual_ptr, true
+        d_x0_ptr, d_dual_ptr,
+        true, true
     );
 
     // Convert P and dual when necessary using the input tensor options

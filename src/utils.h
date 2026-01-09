@@ -18,7 +18,7 @@ void compute_log_vector_cuda(const double* d_x, double* d_logx, int size);
 inline int heuristic_num_blocks()
 {
     // Get the ID of the current active device
-    int device_id;
+    int device_id = 0;
     cudaGetDevice(&device_id);
 
     // Get the number of streaming multiprocessors (SMs)
