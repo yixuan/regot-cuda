@@ -101,7 +101,7 @@ __global__ void compute_squared_l2_distance_kernel(
 }
 
 // Helper function to compute the l2 distance between vectors on device
-double compute_l2_distance_cuda(double* d_vec1, double* d_vec2, int size)
+double compute_l2_distance_cuda(const double* d_vec1, const double* d_vec2, int size)
 {
     // Initialize result to zero
     double* d_result;
@@ -163,7 +163,7 @@ __global__ void compute_squared_l2_norm_kernel(
 }
 
 // Helper function to compute the l2 norm of a vector on device
-double compute_l2_norm_cuda(double* d_vec, int size)
+double compute_l2_norm_cuda(const double* d_vec, int size)
 {
     // Initialize result to zero
     double* d_result;
