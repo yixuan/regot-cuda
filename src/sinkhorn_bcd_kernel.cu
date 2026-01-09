@@ -422,42 +422,34 @@ void compute_transport_plan(
 }
 
 // CUDA implementation of BCD algorithm for entropic-regularized OT
-void cuda_sinkhorn_bcd(
-    const double* M, const double* a, const double* b, double* P,
+// Assume that data are aleady on the device
+void cuda_sinkhorn_bcd_device(
+    const double* d_M, const double* d_a, const double* d_b, double* d_P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    const double* x0, double* dual
+    const double* d_x0, double* dual, bool dual_on_device
 )
 {
     // Allocate device memory
-    double *d_M, *d_a, *d_b, *d_alpha, *d_beta, *d_loga, *d_logb, *d_P;
+    double *d_alpha, *d_beta, *d_loga, *d_logb;
     double *d_alpha_prev, *d_beta_prev, *d_marginal;
-    CUDA_CHECK(cudaMalloc(&d_M, n * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_a, n * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_b, m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_alpha, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_beta, m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_loga, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_logb, m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_P, n * m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_alpha_prev, n * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_beta_prev, m * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_marginal, max(n, m) * sizeof(double)));
-
-    // Copy input to device
-    CUDA_CHECK(cudaMemcpy(d_M, M, n * m * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_a, a, n * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b, b, m * sizeof(double), cudaMemcpyHostToDevice));
 
     // Compute log vectors on device
     compute_log_vector_cuda(d_a, d_loga, n);
     compute_log_vector_cuda(d_b, d_logb, m);
 
     // Initialize alpha and beta
-    if (x0 != nullptr)
+    if (d_x0 != nullptr)
     {
         // Use provided initial values: x0 contains [alpha (n elements), beta (m elements)]
-        CUDA_CHECK(cudaMemcpy(d_alpha, x0, n * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_beta, x0 + n, m * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_alpha, d_x0, n * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(d_beta, d_x0 + n, m * sizeof(double), cudaMemcpyDeviceToDevice));
     }
     else
     {
@@ -548,26 +540,74 @@ void cuda_sinkhorn_bcd(
     // Compute final transport plan
     compute_transport_plan(d_M, d_alpha, d_beta, d_P, reg, n, m);
 
-    // Copy result back to host
-    CUDA_CHECK(cudaMemcpy(P, d_P, n * m * sizeof(double), cudaMemcpyDeviceToHost));
-
-    // Copy dual variables back to host if requested
+    // Copy dual variables back to host/device if requested
     if (dual != nullptr)
     {
-        CUDA_CHECK(cudaMemcpy(dual, d_alpha, n * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(dual + n, d_beta, m * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(
+            dual, d_alpha, n * sizeof(double),
+            dual_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyDeviceToHost
+        ));
+        CUDA_CHECK(cudaMemcpy(
+            dual + n, d_beta, m * sizeof(double),
+            dual_on_device ? cudaMemcpyDeviceToDevice: cudaMemcpyDeviceToHost
+        ));
     }
+
+    // Free device memory
+    CUDA_CHECK(cudaFree(d_alpha));
+    CUDA_CHECK(cudaFree(d_beta));
+    CUDA_CHECK(cudaFree(d_loga));
+    CUDA_CHECK(cudaFree(d_logb));
+    CUDA_CHECK(cudaFree(d_alpha_prev));
+    CUDA_CHECK(cudaFree(d_beta_prev));
+    CUDA_CHECK(cudaFree(d_marginal));
+}
+
+// CUDA implementation of BCD algorithm for entropic-regularized OT
+void cuda_sinkhorn_bcd(
+    const double* M, const double* a, const double* b, double* P,
+    double reg, int max_iter, double tol, int n, int m, int* niter,
+    const double* x0, double* dual
+)
+{
+    // Allocate device memory
+    double *d_M, *d_a, *d_b, *d_P;
+    CUDA_CHECK(cudaMalloc(&d_M, n * m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_a, n * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_b, m * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_P, n * m * sizeof(double)));
+
+    // Copy input to device
+    CUDA_CHECK(cudaMemcpy(d_M, M, n * m * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_a, a, n * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b, b, m * sizeof(double), cudaMemcpyHostToDevice));
+
+    // Initial value
+    double* d_x0 = nullptr;
+    if (x0 != nullptr)
+    {
+        // Allocate memory for d_x0
+        CUDA_CHECK(cudaMalloc(&d_x0, (n + m) * sizeof(double)));
+        CUDA_CHECK(cudaMemcpy(d_x0, x0, (n + m) * sizeof(double), cudaMemcpyHostToDevice));
+    }
+
+    // Call device function
+    cuda_sinkhorn_bcd_device(
+        d_M, d_a, d_b, d_P,
+        reg, max_iter, tol, n, m, niter,
+        d_x0, dual, false
+    );
+
+    // Copy result back to host
+    CUDA_CHECK(cudaMemcpy(P, d_P, n * m * sizeof(double), cudaMemcpyDeviceToHost));
 
     // Free device memory
     CUDA_CHECK(cudaFree(d_M));
     CUDA_CHECK(cudaFree(d_a));
     CUDA_CHECK(cudaFree(d_b));
-    CUDA_CHECK(cudaFree(d_alpha));
-    CUDA_CHECK(cudaFree(d_beta));
-    CUDA_CHECK(cudaFree(d_loga));
-    CUDA_CHECK(cudaFree(d_logb));
     CUDA_CHECK(cudaFree(d_P));
-    CUDA_CHECK(cudaFree(d_alpha_prev));
-    CUDA_CHECK(cudaFree(d_beta_prev));
-    CUDA_CHECK(cudaFree(d_marginal));
+    if (d_x0 != nullptr)
+    {
+        CUDA_CHECK(cudaFree(d_x0));
+    }
 }

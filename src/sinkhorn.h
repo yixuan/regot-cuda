@@ -1,6 +1,12 @@
 #pragma once
 
 // Main solver functions
+void cuda_sinkhorn_bcd_device(
+    const double* d_M, const double* d_a, const double* d_b, double* d_P,
+    double reg, int max_iter, double tol, int n, int m, int* niter,
+    const double* d_x0 = nullptr, double* dual = nullptr, bool dual_on_device = false
+);
+
 void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
