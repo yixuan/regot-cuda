@@ -79,7 +79,11 @@ py::dict sinkhorn_bcd(
 
     // Call CUDA function for BCD algorithm
     int niter = 0;
-    cuda_sinkhorn_bcd(M_ptr, a_ptr, b_ptr, P_ptr, reg, max_iter, tol, n, m, &niter, x0_ptr, dual_ptr);
+    cuda_sinkhorn_bcd(
+        M_ptr, a_ptr, b_ptr, P_ptr,
+        reg, max_iter, tol, n, m, &niter,
+        x0_ptr, dual_ptr
+    );
 
     // Create result dictionary
     py::dict result;
