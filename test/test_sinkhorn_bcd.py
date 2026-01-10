@@ -91,6 +91,7 @@ def test_cuda_vs_reference():
             print("⚠ CUDA implementation close to reference (error < 1e-2)")
         else:
             print("✗ CUDA implementation differs significantly from reference")
+            return False
 
         # Check marginals (row and column sums)
         cuda_row_sums = np.sum(cuda_plan, axis=1)
@@ -372,6 +373,7 @@ def main():
         print("✓ Warm-start working")
         return 0
     else:
+        print("=" * 80)
         print("✗ Some tests failed!")
         return 1
 
