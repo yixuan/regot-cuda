@@ -3,19 +3,26 @@
 Test script for sparse Cholesky solver functionality
 """
 
+import sys
 import numpy as np
 import scipy.sparse as sparse
 
+try:
+    import curegot
+    print("✓ Successfully imported curegot (CUDA) module")
+except ImportError as e:
+    print(f"✗ Failed to import curegot: {e}")
+    sys.exit(1)
+
 # np.set_printoptions(linewidth=100)
+
+def print_header(header):
+    nchar_left = (78 - len(header)) // 2
+    nchar_right = 78 - nchar_left - len(header)
+    print(f"{'=' * nchar_left} {header} {'=' * nchar_right}")
 
 def test_sparse_cholesky_random(n, density=0.01):
     """Test the sparse Cholesky solver with random data"""
-    try:
-        import curegot
-        print("✓ Successfully imported curegot (CUDA) module")
-    except ImportError as e:
-        print(f"✗ Failed to import curegot: {e}")
-        return
 
     # Create a random sparse square matrix
     spmat = sparse.random(n, n, density=density, format="coo")
@@ -40,19 +47,16 @@ def test_sparse_cholesky_random(n, density=0.01):
 
     try:
         # Solve the system
-        print("\n  === Test Sparse Cholesky Solver ===")
-        print(f"  n = {n}")
-        xtest = curegot.test_sparse_cholesky_solve(
+        xtest = curegot.tests.test_sparse_cholesky_solve(
             M.data, M.indices, M.indptr, rhs)
         err1 = np.linalg.norm(xtest - x)
-        print(f"  err = {err1}")
+        print(f"Test sparse Cholesky solver:          error = {err1}")
         
         # Using only the lower triangular part
-        print("  === Using only the lower triangular part ===")
-        xtest = curegot.test_sparse_cholesky_solve(
+        xtest = curegot.tests.test_sparse_cholesky_solve(
             Mlower.data, Mlower.indices, Mlower.indptr, rhs)
         err2 = np.linalg.norm(xtest - x)
-        print(f"  err = {err2}")
+        print(f"Using only the lower triangular part: error = {err2}")
 
         if err1 < 1e-8 and err2 < 1e-8:
             print("✓ Test PASSED!")
@@ -61,15 +65,24 @@ def test_sparse_cholesky_random(n, density=0.01):
 
     except Exception as e:
         print(f"✗ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
 
 if __name__ == "__main__":
     np.random.seed(123)
+    n, density = 10, 0.1
+    print_header(f"n = {n}, density = {density}")
     test_sparse_cholesky_random(10, density=0.1)
     print()
+
+    n, density = 100, 0.01
+    print_header(f"n = {n}, density = {density}")
     test_sparse_cholesky_random(100, density=0.01)
     print()
+
+    n, density = 1000, 0.001
+    print_header(f"n = {n}, density = {density}")
     test_sparse_cholesky_random(1000, density=0.001)
     print()
+
+    n, density = 10000, 0.0001
+    print_header(f"n = {n}, density = {density}")
     test_sparse_cholesky_random(10000, density=0.0001)

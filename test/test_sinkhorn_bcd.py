@@ -6,10 +6,38 @@ Test script for RegOT-CUDA sinkhorn_bcd() function
 import numpy as np
 import sys
 
+def print_header(header):
+    nchar_left = (78 - len(header)) // 2
+    nchar_right = 78 - nchar_left - len(header)
+    print(f"{'=' * nchar_left} {header} {'=' * nchar_right}")
+
+def generate_data(n, m, reg):
+    # Random cost matrix M [n x m]
+    M = np.random.rand(n, m)
+
+    # Probability vectors a [n] and b [m]
+    a = np.random.rand(n)
+    # Normalize to sum to 1
+    a = a / np.sum(a)
+
+    b = np.random.rand(m)
+    # Normalize to sum to 1
+    b = b / np.sum(b)
+
+    print(f"Test data:")
+    print(f"  M shape: {M.shape}")
+    print(f"  a shape: {a.shape}, sum: {np.sum(a):.6f}")
+    print(f"  b shape: {b.shape}, sum: {np.sum(b):.6f}")
+    print(f"  reg: {reg}")
+    print()
+
+    return M, a, b
+
 def test_cuda_vs_reference():
     """Test CUDA implementation against RegOT-Python reference"""
     try:
         import curegot
+        sinkhorn_bcd = curegot.numpy.sinkhorn_bcd
         print("✓ Successfully imported curegot (CUDA) module")
     except ImportError as e:
         print(f"✗ Failed to import curegot: {e}")
@@ -25,34 +53,16 @@ def test_cuda_vs_reference():
 
     # Create test data
     np.random.seed(123)
+    # Problem size
     n, m = 80, 60
-
-    # Random cost matrix M [n x m]
-    M = np.random.rand(n, m)
-
-    # Probability vectors a [n] and b [m]
-    a = np.random.rand(n)
-    # Normalize to sum to 1
-    a = a / np.sum(a)
-
-    b = np.random.rand(m)
-    # Normalize to sum to 1
-    b = b / np.sum(b)
-
     # Regularization parameter
     reg = 0.01
-
-    print(f"Test data:")
-    print(f"  M shape: {M.shape}")
-    print(f"  a shape: {a.shape}, sum: {np.sum(a):.6f}")
-    print(f"  b shape: {b.shape}, sum: {np.sum(b):.6f}")
-    print(f"  reg: {reg}")
-    print()
+    M, a, b = generate_data(n, m, reg)
 
     try:
         # Call CUDA implementation
         print("Running CUDA implementation...")
-        cuda_result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=1)
+        cuda_result = sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=1)
         cuda_plan = cuda_result["plan"]
         print("✓ CUDA implementation completed")
         print()
@@ -73,7 +83,7 @@ def test_cuda_vs_reference():
 
         # Check if plans are close
         relative_error = np.linalg.norm(cuda_plan - ref_plan) / np.linalg.norm(ref_plan)
-        print(f"  Relative Frobenius norm error: {relative_error:.2e}")
+        print(f"  Relative Frobenius norm error of plan: {relative_error:.2e}")
 
         if relative_error < 1e-3:
             print("✓ CUDA implementation matches reference (error < 1e-3)")
@@ -107,14 +117,13 @@ def test_cuda_vs_reference():
 
     except Exception as e:
         print(f"✗ Error during comparison: {e}")
-        import traceback
-        traceback.print_exc()
         return False
 
 def test_convergence_mechanism():
     """Test the convergence mechanism and tolerance parameter"""
     try:
         import curegot
+        sinkhorn_bcd = curegot.numpy.sinkhorn_bcd
         print("✓ Successfully imported curegot (CUDA) module")
     except ImportError as e:
         print(f"✗ Failed to import curegot: {e}")
@@ -123,17 +132,8 @@ def test_convergence_mechanism():
     # Create test data
     np.random.seed(456)
     n, m = 50, 40
-    M = np.random.rand(n, m)
-    a = np.random.rand(n)
-    a = a / np.sum(a)
-    b = np.random.rand(m)
-    b = b / np.sum(b)
     reg = 0.01
-
-    print()
-    print("Testing convergence mechanism:")
-    print(f"Problem size: [{n} x {m}], reg: {reg}")
-    print()
+    M, a, b = generate_data(n, m, reg)
 
     try:
         # Test with different tolerance values
@@ -142,7 +142,7 @@ def test_convergence_mechanism():
 
         print(f"Testing with different tolerance values:")
         for tol in tolerances:
-            result = curegot.sinkhorn_bcd(M, a, b, reg, tol=tol, max_iter=max_iter, verbose=0)
+            result = sinkhorn_bcd(M, a, b, reg, tol=tol, max_iter=max_iter, verbose=0)
 
             if "niter" not in result:
                 print(f"  ✗ Result missing 'niter' key")
@@ -159,8 +159,8 @@ def test_convergence_mechanism():
         # Test convergence: stricter tolerance should take more iterations
         print()
         print(f"Testing convergence behavior:")
-        strict_result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-8, max_iter=2000, verbose=0)
-        loose_result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-2, max_iter=2000, verbose=0)
+        strict_result = sinkhorn_bcd(M, a, b, reg, tol=1e-8, max_iter=2000, verbose=0)
+        loose_result = sinkhorn_bcd(M, a, b, reg, tol=1e-2, max_iter=2000, verbose=0)
 
         print(f"  Strict tolerance (1e-8): {strict_result['niter']} iterations")
         print(f"  Loose tolerance (1e-2): {loose_result['niter']} iterations")
@@ -168,7 +168,7 @@ def test_convergence_mechanism():
         # Test with very low max_iter to see truncation behavior
         print()
         print(f"Testing max_iter truncation:")
-        truncated_result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-10, max_iter=10, verbose=0)
+        truncated_result = sinkhorn_bcd(M, a, b, reg, tol=1e-10, max_iter=10, verbose=0)
         print(f"  max_iter=10: niter={truncated_result['niter']}")
 
         if truncated_result["niter"] != 10:
@@ -181,7 +181,7 @@ def test_convergence_mechanism():
         test_tolerances = [1e-4, 1e-6]
 
         for tol in test_tolerances:
-            result = curegot.sinkhorn_bcd(M, a, b, reg, tol=tol, max_iter=1000, verbose=0)
+            result = sinkhorn_bcd(M, a, b, reg, tol=tol, max_iter=1000, verbose=0)
             plan = result["plan"]
 
             # Compute marginals from the final transport plan
@@ -205,8 +205,8 @@ def test_convergence_mechanism():
         # Test that convergence actually happened by comparing plans
         print()
         print(f"Testing actual convergence:")
-        converged_result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=0)
-        unconverged_result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=5, verbose=0)
+        converged_result = sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=0)
+        unconverged_result = sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=5, verbose=0)
 
         # The converged result should have smaller marginal errors
         plan_converged = converged_result["plan"]
@@ -232,15 +232,14 @@ def test_convergence_mechanism():
         return True
 
     except Exception as e:
-        print(f"  ✗ Error in convergence test: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"✗ Error in convergence test: {e}")
         return False
 
 def test_warm_start():
     """Test the warm-start mechanism"""
     try:
         import curegot
+        sinkhorn_bcd = curegot.numpy.sinkhorn_bcd
         print("✓ Successfully imported curegot (CUDA) module")
     except ImportError as e:
         print(f"✗ Failed to import curegot: {e}")
@@ -249,23 +248,15 @@ def test_warm_start():
     # Create test data
     np.random.seed(789)
     n, m = 50, 40
-    M = np.random.rand(n, m)
-    a = np.random.rand(n)
-    a = a / np.sum(a)
-    b = np.random.rand(m)
-    b = b / np.sum(b)
     reg = 0.01
-
-    print("Testing warm-start mechanism:")
-    print(f"Problem size: [{n} x {m}], reg: {reg}")
-    print()
+    M, a, b = generate_data(n, m, reg)
 
     tol = 1e-8
     max_iter = 2000
 
     # First run: using zero initial values
     print("First run: using zero initial values...")
-    result1 = curegot.sinkhorn_bcd(M, a, b, reg, tol, max_iter, verbose=0)
+    result1 = sinkhorn_bcd(M, a, b, reg, tol, max_iter, verbose=0)
 
     niter1 = result1["niter"]
     dual1 = result1["dual"]
@@ -284,7 +275,7 @@ def test_warm_start():
     # Second run: use the dual variables in the first run as initial values
     print("Second run: use the dual variables in the first run as initial values...")
     # Use x0 argument
-    result2 = curegot.sinkhorn_bcd(
+    result2 = sinkhorn_bcd(
         M, a, b, reg, tol, max_iter, verbose=0, x0=dual1
     )
 
@@ -296,7 +287,7 @@ def test_warm_start():
     print("Third run: use perturbed initial values...")
     # Add some noise
     noisy_dual = dual1 + 0.01 * np.random.randn(n + m)
-    result3 = curegot.sinkhorn_bcd(
+    result3 = sinkhorn_bcd(
         M, a, b, reg, tol, max_iter, verbose=0, x0=noisy_dual
     )
 
@@ -321,8 +312,8 @@ def test_warm_start():
     plan_diff_12 = np.linalg.norm(plan1 - result2["plan"], ord="fro")
     plan_diff_13 = np.linalg.norm(plan1 - result3['plan'], ord="fro")
     print("Check quality:")
-    print(f"  ||a_tilde - a|| = {marginal_error_a_1:.2e}")
-    print(f"  ||b_tilde - b|| = {marginal_error_b_1:.2e}")
+    print(f"  || a_tilde - a || = {marginal_error_a_1:.2e}")
+    print(f"  || b_tilde - b || = {marginal_error_b_1:.2e}")
     print(f"  || plan1 - plan2 ||_F: {plan_diff_12:.2e}")
     print(f"  || plan1 - plan3 ||_F: {plan_diff_13:.2e}")
     print()
@@ -339,7 +330,7 @@ def test_warm_start():
         print(f"✗ Difference of transport plans is too large ({plan_diff_12:.2e})")
         success = False
     else:
-        print(f"✓ Transport plans are consistent (Difference: {plan_diff_12:.2e})")
+        print(f"✓ Transport plans are consistent (difference: {plan_diff_12:.2e})")
 
     if marginal_error_a_1 > 1e-6 or marginal_error_b_1 > 1e-6:
         print(f"✗ Marginal errors are too large (a: {marginal_error_a_1:.2e}, b: {marginal_error_b_1:.2e})")
@@ -351,11 +342,11 @@ def test_warm_start():
 
 def main():
     """Run all tests"""
-    print("================= RegOT-CUDA Tests =================")
+    print_header("RegOT-CUDA Tests")
     print()
 
     # Test against reference implementation
-    print("1. Comparison with RegOT-Python reference:")
+    print_header("1. Comparison with RegOT-Python reference")
     comparison_success = test_cuda_vs_reference()
     print()
 
@@ -364,12 +355,12 @@ def main():
         return 1
 
     # Test convergence mechanism
-    print("2. Convergence mechanism test:")
+    print_header("2. Testing convergence mechanism")
     convergence_success = test_convergence_mechanism()
     print()
 
     # Test warm-start mechanism
-    print("3. Warm-start mechanism test:")
+    print_header("3. Testing warm-start mechanism")
     warmstart_success = test_warm_start()
     print()
 

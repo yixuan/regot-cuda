@@ -8,6 +8,11 @@ from scipy.sparse import csr_matrix
 
 np.set_printoptions(linewidth=100)
 
+def print_header(header):
+    nchar_left = (78 - len(header)) // 2
+    nchar_right = 78 - nchar_left - len(header)
+    print(f"{'=' * nchar_left} {header} {'=' * nchar_right}")
+
 def test_csr_conversion():
     """Test the CSR conversion functionality"""
     try:
@@ -32,17 +37,16 @@ def test_csr_conversion():
     b = b / np.sum(b)
     T = np.exp((alpha.reshape(n, 1) + beta.reshape(1, m) - M) / reg)
 
-    print("=== Input Data ===")
+    print_header("Input Data")
     print(f"Input shape: {n} x {m}")
     print(f"Regularization parameter: {reg}")
     print(f"K (top elements requested): {K}")
-    print(f"alpha: {alpha}")
-    print(f"beta: {beta}")
-    print("M matrix:")
-    print(M)
+    print(f"alpha:\n{alpha}")
+    print(f"beta:\n{beta}")
+    print(f"M matrix:\n{M}")
     print()
-    print("T matrix:")
-    print(T)
+
+    print(f"T matrix:\n{T}")
     Tsum = np.sum(T)
     Trowsums = np.sum(T, axis=1)
     Tcolsums = np.sum(T, axis=0)
@@ -52,8 +56,8 @@ def test_csr_conversion():
     print()
     objfn = reg * Tsum - alpha.dot(a) - beta.dot(b)
     grad = np.concatenate((Trowsums - a, Tcolsums[:-1] - b[:-1]))
-    print(f"objfn = {objfn:.6f}")
-    print(f"grad = {grad}")
+    print(f"Objfn = {objfn:.6f}")
+    print(f"Grad = {grad}")
     print()
 
     # Exclude last column
@@ -71,12 +75,15 @@ def test_csr_conversion():
     print(f"Data: {Hsl.data}")
     print(f"Col index: {Hsl.indices}")
     print(f"Row pointer: {Hsl.indptr}")
+    print()
 
     try:
         # Call the function
-        result = curegot.test_T_computation_sparsify(alpha, beta, M, a, b, reg, shift, K, nrun=1)
+        result = curegot.tests.test_T_computation_sparsify(
+            alpha, beta, M, a, b, reg, shift, K, nrun=1
+        )
 
-        print(f"\n=== T Computation Results ===")
+        print_header("T Computation Results")
         print(f"Total sum: {result['Tsum']:.6f}")
         print(f"Row sums: {result['Trowsums']}")
         print(f"Column sums: {result['Tcolsums']}")
@@ -84,6 +91,7 @@ def test_csr_conversion():
 
         print(f"Objfn: {result['objfn']:.6f}")
         print(f"Grad: {result['grad']}")
+        print()
 
         csr_val = result["csr_val"]
         csr_colind = result["csr_colind"]
@@ -93,7 +101,7 @@ def test_csr_conversion():
         print(f"CSR row pointer: {csr_rowptr}")
         print()
 
-        print(f"=== Verification ===")
+        print_header("Verification")
         Tsum_diff = np.abs(Tsum - result["Tsum"])
         if Tsum_diff < 1e-8:
             print(f"✓ Tsum matches, difference = {Tsum_diff}")
