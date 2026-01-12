@@ -109,6 +109,7 @@ private:
     const double* d_M;
     double*       d_M_storage;
     double*       d_ab;
+    double*       d_logab;
     // Dual variables on device
     double*       d_gamma;
     double*       d_gamma_prev;
@@ -185,6 +186,7 @@ public:
 
         // Allocate device memory
         CUDA_CHECK(cudaMalloc(&d_ab, (m_n + m_m) * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_logab, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma_prev, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
@@ -215,6 +217,9 @@ public:
             input_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice
         ));
 
+        // Compute log(a) and log(b)
+        compute_log_vector_cuda(d_ab, d_logab, m_n + m_m);
+
         // Set d_grad_prev to zero
         CUDA_CHECK(cudaMemset(d_grad_prev, 0, m_Hsize * sizeof(double)));
     }
@@ -228,6 +233,7 @@ public:
             CUDA_CHECK(cudaFree(d_M_storage));
         }
         CUDA_CHECK(cudaFree(d_ab));
+        CUDA_CHECK(cudaFree(d_logab));
         CUDA_CHECK(cudaFree(d_gamma));
         CUDA_CHECK(cudaFree(d_gamma_prev));
         CUDA_CHECK(cudaFree(d_objfn));
@@ -246,46 +252,27 @@ public:
     }
 
     // Sinkhorn iteration to update alpha
-    // Note that this function should not be called frequently,
-    // since we temporarily compute the log(a) vector
     void update_alpha()
     {
-        // Compute log(a) vector
-        double* d_loga;
-        CUDA_CHECK(cudaMalloc(&d_loga, m_n * sizeof(double)));
-
-        // Compute log(a) on device
-        compute_log_vector_cuda(d_ab, d_loga, m_n);
+        // Get pointer for log(a)
+        const double* d_loga = d_logab;
 
         // Optimal alpha given beta
         // d_alpha = d_gamma
         // d_beta = d_gamma + n
         compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha, m_reg, m_n, m_m);
-
-        // Free log(a) vector
-        CUDA_CHECK(cudaFree(d_loga));
     }
 
     // Sinkhorn iteration to update beta
-    // Note that this function should not be called frequently,
-    // since we temporarily compute the log(b) vector
     void update_beta()
     {
-        // Compute log(b) vector
-        double* d_logb;
-        CUDA_CHECK(cudaMalloc(&d_logb, m_m * sizeof(double)));
-
-        // Compute log(b) on device
-        double* d_b = d_ab + m_n;
-        compute_log_vector_cuda(d_b, d_logb, m_m);
+        // Get pointer for log(b)
+        const double* d_logb = d_logab + m_n;
 
         // Optimal beta given alpha
         // d_alpha = d_gamma
         // d_beta = d_gamma + n
         compute_optimal_beta(d_M, d_alpha, d_logb, d_beta, m_reg, m_n, m_m);
-
-        // Free log(b) vector
-        CUDA_CHECK(cudaFree(d_logb));
     }
 
     // Initialize dual variables
