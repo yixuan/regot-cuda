@@ -194,7 +194,8 @@ __global__ void optimal_alpha_kernel(
 // Helper function to compute optimal beta given alpha
 void compute_optimal_beta(
     const double* d_M, const double* d_alpha, const double* d_logb,
-    double* d_beta, double reg, int n, int m
+    double* d_beta, double reg, int n, int m,
+    cudaStream_t stream
 )
 {
     // Configure kernel launch parameters
@@ -213,7 +214,7 @@ void compute_optimal_beta(
     size_t sharedMemory_beta = threadsPerBlock.x * sizeof(double);   // For reduction in optimal_beta_kernel
 
     // Optimal beta given alpha
-    optimal_beta_kernel<<<numBlocks_beta, threadsPerBlock, sharedMemory_beta>>>(
+    optimal_beta_kernel<<<numBlocks_beta, threadsPerBlock, sharedMemory_beta, stream>>>(
         d_M, d_alpha, d_logb, d_beta, reg, n, m
     );
 }
@@ -221,7 +222,8 @@ void compute_optimal_beta(
 // Helper function to compute optimal alpha given beta
 void compute_optimal_alpha(
     const double* d_M, const double* d_beta, const double* d_loga,
-    double* d_alpha, double reg, int n, int m
+    double* d_alpha, double reg, int n, int m,
+    cudaStream_t stream
 )
 {
     // Configure kernel launch parameters
@@ -240,7 +242,7 @@ void compute_optimal_alpha(
     // size_t sharedMemory_beta = threadsPerBlock.x * sizeof(double);   // For reduction in optimal_beta_kernel
 
     // Optimal alpha given beta
-    optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock, sharedMemory_alpha>>>(
+    optimal_alpha_kernel<<<numBlocks_alpha, threadsPerBlock, sharedMemory_alpha, stream>>>(
         d_M, d_beta, d_loga, d_alpha, reg, n, m
     );
 }

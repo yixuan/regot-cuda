@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cuda_runtime.h>
+
 // Main solver functions
 void cuda_sinkhorn_bcd(
     const double* M, const double* a, const double* b, double* P,
@@ -21,13 +23,15 @@ void cuda_sinkhorn_splr(
 // Helper function to compute optimal beta given alpha
 void compute_optimal_beta(
     const double* d_M, const double* d_alpha, const double* d_logb,
-    double* d_beta, double reg, int n, int m
+    double* d_beta, double reg, int n, int m,
+    cudaStream_t stream = cudaStreamPerThread
 );
 
 // Helper function to compute optimal alpha given beta
 void compute_optimal_alpha(
     const double* d_M, const double* d_beta, const double* d_loga,
-    double* d_alpha, double reg, int n, int m
+    double* d_alpha, double reg, int n, int m,
+    cudaStream_t stream = cudaStreamPerThread
 );
 
 // Helper function to compute final transport plan P
