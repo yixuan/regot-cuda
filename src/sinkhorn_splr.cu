@@ -380,7 +380,7 @@ public:
     }
 
     // Compute search direction (with low-rank term)
-    void compute_search_direc(size_t nnz, double ys, bool low_rank = true, bool analyze_pattern = true)
+    void compute_search_direc(size_t nnz, double ys, bool low_rank = true, bool analyze_pattern = true, int verbose = 0)
     {
         // Solve (H + UCV) * d = -g
         // U = [u, v], C = diag(a, b), V = U'
@@ -410,15 +410,32 @@ public:
         // and then do the scaling d <- -reg * x
         
         // direc = invA_g = inv(A) * g;
+        Timer timer(verbose >= 3);
+        timer.tic();
         m_linsolver.set_A(d_Hvalues, d_Hcolind, d_Hrowptr, m_Hsize, nnz);
         m_linsolver.set_b(d_grad, m_Hsize);
         m_linsolver.set_x(d_direc, m_Hsize);
+
         if (analyze_pattern)
         {
-            m_linsolver.analyze();
+            // For timing, we separate analyze() as reorder() + symfac()
+            // Otherwise we run the combined analyze()
+            if (verbose >= 3)
+            {
+                m_linsolver.reorder();
+                timer.toc("reorder");
+                m_linsolver.symfac();
+                timer.toc("symfac");
+            }
+            else
+            {
+                m_linsolver.analyze();
+            }
         }
         m_linsolver.factorize();
+        timer.toc("factorize");
         m_linsolver.solve();
+        timer.toc("solve");
 
         if (low_rank)
         {
@@ -434,6 +451,7 @@ public:
             // direc += ((1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
             launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_reg, m_Hsize);
         }
+        timer.toc("low_rank");
 
         // Scaling d <- -reg * x
         thrust::constant_iterator<double> constant_iter(-m_reg);
@@ -442,6 +460,16 @@ public:
             d_direc_ptr, d_direc_ptr + m_Hsize, constant_iter, d_direc_ptr,
             thrust::multiplies<double>()
         );
+        timer.toc("scaling");
+
+        if (verbose >= 3)
+        {
+            std::cout << "[search_direc_timing]--------------------------------------" << std::endl;
+            std::cout << "║ reorder = " << timer["reorder"] << ", symfac = " << timer["symfac"] << std::endl;
+            std::cout << "║ factorize = " << timer["factorize"] << ", solve = " << timer["solve"] << std::endl;
+            std::cout << "║ low_rank = " << timer["low_rank"] << ", scaling = " << timer["scaling"] << std::endl;
+            std::cout << "===========================================================" << std::endl;
+        }
     }
 
     // Save d_gamma to d_gamma_prev, and d_grad to d_grad_prev
@@ -772,7 +800,7 @@ void cuda_sinkhorn_splr(
         const bool analyze_pattern = (iter % pattern_cycle == 0);
         const bool update_pattern = (iter % pattern_cycle == (pattern_cycle - 1));
 
-        solver.compute_search_direc(nnz, ys, low_rank, analyze_pattern);
+        solver.compute_search_direc(nnz, ys, low_rank, analyze_pattern, verbose);
         timer_inner.toc("search_direc");
 
         // Line search will overwrite d_gamma and d_grad, so
@@ -818,7 +846,7 @@ void cuda_sinkhorn_splr(
 
         if (verbose >= 2)
         {
-            std::cout << "[lowrank]---------------------------------------------------" << std::endl;
+            std::cout << "[lowrank]--------------------------------------------------" << std::endl;
             std::cout << "║ ys = " << ys << ", yy = " << yy << std::endl;
             std::cout << "║ low_rank = " << low_rank << ", analyze = " << analyze_pattern <<
                 ", update = " << update_pattern << std::endl;
