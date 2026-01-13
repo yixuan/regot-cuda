@@ -35,6 +35,10 @@
 #define BLOCK_DIM_Y 16
 #define BLOCK_DIM 256
 
+// Helper function to transform the gamma=(alpha, beta) vector to gamma'=(alpha', beta_t', 0)
+// alpha += beta[m-1], beta -= beta[m-1]
+void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStreamPerThread);
+
 // Helper function to compute objective function value objfn,
 // gradient grad, and sparsified Hessian in CSR form
 // From sinkhorn_splr_kernel.cu
@@ -291,29 +295,8 @@ public:
                 d_gamma, x0, (m_n + m_m) * sizeof(double),
                 input_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice
             ));
-            // Get shift = beta[m-1] = gamma[n+m-1]
-            double shift;
-            CUDA_CHECK(cudaMemcpy(
-                &shift, d_gamma + (m_n + m_m - 1), sizeof(double),
-                cudaMemcpyDeviceToHost
-            ));
-            // alpha += shift
-            thrust::device_ptr<double> d_gamma_ptr(d_gamma);
-            thrust::transform(
-                d_gamma_ptr,
-                d_gamma_ptr + m_n,
-                thrust::constant_iterator<double>(shift),
-                d_gamma_ptr,
-                thrust::plus<double>()
-            );
-            // beta -= shift
-            thrust::transform(
-                d_gamma_ptr + m_n,
-                d_gamma_ptr + (m_n + m_m),
-                thrust::constant_iterator<double>(shift),
-                d_gamma_ptr + m_n,
-                thrust::minus<double>()
-            );
+            // Shift d_gamma
+            shift_gamma(d_gamma, m_n, m_m);
         }
         else
         {

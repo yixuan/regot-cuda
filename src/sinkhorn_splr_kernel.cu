@@ -159,6 +159,52 @@ __device__ __forceinline__ double block_reduce_sum(double val)
     return sum;
 }
 
+// CUDA kernel to transform the gamma=(alpha, beta) vector to gamma'=(alpha', beta_t', 0)
+// alpha += beta[m-1], beta -= beta[m-1]
+// The last zero will be set in the helper function that calls this kernel
+__global__ void shift_gamma_kernel(double* d_gamma, int n, int m)
+{
+    // Get shift
+    const int shift_index = n + m - 1;
+    const double shift = d_gamma[shift_index];
+
+    // Grid-stride loop
+    int i_start = blockDim.x * blockIdx.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = i_start; i < shift_index; i += stride)
+    {
+        d_gamma[i] += ((i < n) ? shift : -shift);
+    }
+}
+
+// Helper function to transform the gamma=(alpha, beta) vector to gamma'=(alpha', beta_t', 0)
+// alpha += beta[m-1], beta -= beta[m-1]
+void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStreamPerThread)
+{
+    if (n == 0 && m == 0)
+    {
+        return;
+    }
+
+    // Only work on the first (n + m - 1) elements
+    int work_size = n + m - 1;
+    if (work_size > 0)
+    {
+        dim3 threadsPerBlock(BLOCK_DIM);
+        int numBlocks = (work_size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+        // Limit number of blocks to 256
+        // The grid-stride loop in shift_gamma_kernel() will handle larger sizes
+        numBlocks = std::min(numBlocks, 256);
+
+        shift_gamma_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
+            d_gamma, n, m
+        );
+    }
+
+    // Set gamma[n+m-1]=0
+    cudaMemsetAsync(d_gamma + (n + m - 1), 0, sizeof(double), stream);
+}
+
 // Fused CUDA kernel for computation on T
 // 1. Compute T[i, j] = exp(...)
 // 2. Perform parallel reduction for row sums, column sums, and total sum using shared memory
