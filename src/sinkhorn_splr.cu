@@ -118,6 +118,10 @@ private:
     // Dual variables on device
     double*       d_gamma;
     double*       d_gamma_prev;
+    // Sinkhorn BCD iterate
+    double*       d_gamma_bcd;
+    double*       d_objfn_bcd;
+    double*       d_grad_bcd;
     // Pointer aliases, d_gamma = (d_alpha, d_beta)
     double*       d_alpha;
     double*       d_beta;
@@ -194,6 +198,9 @@ public:
         CUDA_CHECK(cudaMalloc(&d_logab, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma_prev, (m_n + m_m) * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_gamma_bcd, (m_n + m_m) * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_objfn_bcd, sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_grad_bcd, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_grad, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_grad_prev, m_Hsize * sizeof(double)));
@@ -241,6 +248,9 @@ public:
         CUDA_CHECK(cudaFree(d_logab));
         CUDA_CHECK(cudaFree(d_gamma));
         CUDA_CHECK(cudaFree(d_gamma_prev));
+        CUDA_CHECK(cudaFree(d_gamma_bcd));
+        CUDA_CHECK(cudaFree(d_objfn_bcd));
+        CUDA_CHECK(cudaFree(d_grad_bcd));
         CUDA_CHECK(cudaFree(d_objfn));
         CUDA_CHECK(cudaFree(d_grad));
         CUDA_CHECK(cudaFree(d_grad_prev));
@@ -361,6 +371,47 @@ public:
         // ys = y's
         // yy = y'y
         launch_low_rank(d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, ys, yy, m_Hsize);
+    }
+
+    // Compute Sinkhorn iterate
+    // This will be parallel to compute_search_direc()
+    void compute_sinkhorn_iterate(int niter = 3)
+    {
+        const double* d_loga = d_logab;
+        const double* d_logb = d_logab + m_n;
+        double* d_alpha_bcd = d_gamma_bcd;
+        double* d_beta_bcd = d_gamma_bcd + m_n;
+
+        // Read beta from d_gamma and write BCD-computed alpha to d_gamma_bcd
+        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha_bcd, m_reg, m_n, m_m, cudaStreamPerThread);
+        // Sinkhorn iterations
+        for (int i = 0; i < niter; i++)
+        {
+            compute_optimal_beta(d_M, d_alpha_bcd, d_logb, d_beta_bcd, m_reg, m_n, m_m, cudaStreamPerThread);
+            compute_optimal_alpha(d_M, d_beta_bcd, d_loga, d_alpha_bcd, m_reg, m_n, m_m, cudaStreamPerThread);
+        }
+
+        // Shift d_gamma_bcd such that the last element is zero
+        shift_gamma(d_gamma_bcd, m_n, m_m, cudaStreamPerThread);
+
+        // Compute the objective function value and gradient of the Sinkhorn iterate
+        launch_objfn_grad_sphess(
+            d_gamma_bcd, d_M, d_ab,
+            m_reg, 0.001, m_n, m_m, 1,  // shift = 0.001, K=1 are placeholders, not used in stage1
+            d_objfn_bcd, d_grad_bcd,    // Objective function value and gradient written to these pointers
+            d_Hvalues, d_Hflatind, d_Hcolind, d_Hrowptr,  // placeholders here, not used in stage1
+            d_work, d_iwork,
+            true, false,  // stage1, stage2
+            true,         // fixed_indices = true makes stage1 not writing to d_Tvalues and d_Tflatind
+            cudaStreamPerThread
+        );
+    }
+
+    // Get objective function value and gradient norm of the Sinkhorn iterate
+    void objfn_gnorm_bcd(double& objfn, double& gnorm) const
+    {
+        gnorm = compute_l2_norm_cuda(d_grad_bcd, m_Hsize);
+        CUDA_CHECK(cudaMemcpy(&objfn, d_objfn_bcd, sizeof(double), cudaMemcpyDeviceToHost));
     }
 
     // Compute search direction (with low-rank term)
@@ -670,6 +721,12 @@ public:
         axpy(d_direc, d_gamma_prev, alpha, m_Hsize, d_gamma);
     }
 
+    // Update gamma using the Sinkhorn iterate
+    void update_gamma_sinkhorn()
+    {
+        CUDA_CHECK(cudaMemcpy(d_gamma, d_gamma_bcd, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
+    }
+
     // Output results to host -- transport plan and dual variables
     void output_result(double* P, double* dual, bool output_on_device = false)
     {
@@ -778,20 +835,48 @@ void cuda_sinkhorn_splr(
         timer_inner.toc("low_rank");
 
         // Compute search direction
+        // Sparse Cholesky decomposition and solving + BFGS update rule
+        //
         // We do not do low-rank update in the first iteration
         // When <y, s> is too small, don't use low-rank update
         constexpr double eps = 1e-6;  // Or use std::numeric_limits<double>::epsilon();
         const bool low_rank = (iter > 0) && (ys > (eps * yy));
-        // Flags to indicate whether we need to recompute sparsity pattern
+        // Sparse Cholesky decomposition has three main stages:
+        // sparsity pattern analysis, factorization, and solving
+        //
+        // Pattern analysis runs on CPU, and may be time-consuming,
+        // so we can fix the pattern for a few iterations and cyclically update it
+        //
+        // Below are flags to indicate whether we need to analyze or update the sparsity pattern
+        // in the current iteration (basically we update the pattern every `pattern_cycle` iterations
+        // and do the sparsity analysis in the next iteration)
         const bool analyze_pattern = (iter % pattern_cycle == 0);
         const bool update_pattern = (iter % pattern_cycle == (pattern_cycle - 1));
 
+        // When we need to analyze the sparsity pattern in this iteration,
+        // we also compute the Sinkhorn iterate, since the majority of the pattern analysis
+        // runs on CPU, and we can let GPU work to fill this idle time. In this way,
+        // we do not increase the wall time, but can obtain some useful information about the
+        // next move
+        //
+        // The Sinkhorn iterate is a candidate for the next move. For example, we can
+        // compare the objective function value and gradient of both the Sinkhorn iterate
+        // and the quasi-Newton iterate, and then decide which one is the next move
+        if (analyze_pattern)
+        {
+            // This part will run roughly at the same time as the analysis stage of
+            // the sparse Cholesky decomposition
+            solver.compute_sinkhorn_iterate(3);
+        }
         solver.compute_search_direc(nnz, ys, low_rank, analyze_pattern, verbose);
         timer_inner.toc("search_direc");
 
         // Line search will overwrite d_gamma and d_grad, so
         // save d_gamma to d_gamma_prev, and d_grad to d_grad_prev
         solver.save_history();
+
+        // Let Sinkhorn and quasi-Newton computation synchronize here
+        CUDA_CHECK(cudaDeviceSynchronize());
 
         // Wolfe Line Search
         // Will overwrite d_gamma, d_objfn, and d_grad
@@ -818,6 +903,33 @@ void cuda_sinkhorn_splr(
         // Compute the new gradient norm
         const double gnorm_pre = gnorm;
         gnorm = solver.grad_norm();
+
+        // If analyze_pattern is true, it means that we have also computed the Sinkhorn iterate
+        // If it is better than the quasi-Newton direction (both objfn and gnorm are smaller),
+        // then we overwrite gamma with the Sinkhorn iterate
+        if (analyze_pattern)
+        {
+            double objfn_bcd, gnorm_bcd;
+            solver.objfn_gnorm_bcd(objfn_bcd, gnorm_bcd);
+            const bool use_sinkhorn_iter = ((objfn_bcd < objfn) && (gnorm_bcd < gnorm));
+
+            if (verbose >= 2)
+            {
+                std::cout << "[sinkhorn] ------------------------------------------------" << std::endl;
+                std::cout << "║ objfn = " << objfn << ", objfn_bcd = " << objfn_bcd << std::endl;
+                std::cout << "║ gnorm = " << gnorm << ", gnorm_bcd = " << gnorm_bcd << std::endl;
+                std::cout << "║ use_sinkhorn_iter = " << use_sinkhorn_iter << std::endl;
+                std::cout << "===========================================================" << std::endl;
+            }
+
+            if (use_sinkhorn_iter)
+            {
+                solver.update_gamma_sinkhorn();
+                solver.dual_objfn_grad_sphess(density, shift * reg, objfn, true, false, !update_pattern);
+                gnorm = solver.grad_norm();
+            }
+        }
+
         // Adjust density according to gnorm change
         if (update_pattern)
         {
