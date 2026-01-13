@@ -186,11 +186,18 @@ py::dict sinkhorn_splr(
         shift_max = std::max(shift_max, 0.0);
     }
 
-    // Get pattern_cycle from kwargs
-    int pattern_cycle = 30;
-    if (kwargs.contains("pattern_cycle"))
+    // Get sparsity_pattern_cycle from kwargs
+    int sparsity_pattern_cycle = 30;
+    if (kwargs.contains("sparsity_pattern_cycle"))
     {
-        pattern_cycle = py::cast<int>(kwargs["pattern_cycle"]);
+        sparsity_pattern_cycle = py::cast<int>(kwargs["sparsity_pattern_cycle"]);
+    }
+
+    // Get compute_sinkhorn_iterate from kwargs
+    bool compute_sinkhorn_iterate = true;
+    if (kwargs.contains("compute_sinkhorn_iterate"))
+    {
+        compute_sinkhorn_iterate = py::cast<bool>(kwargs["compute_sinkhorn_iterate"]);
     }
 
     // Create output arrays
@@ -207,7 +214,8 @@ py::dict sinkhorn_splr(
     cuda_sinkhorn_splr(
         M_ptr, a_ptr, b_ptr, P_ptr,
         reg, max_iter, tol, n, m, &niter,
-        density_max, shift_max, pattern_cycle, verbose,
+        density_max, shift_max,
+        sparsity_pattern_cycle, compute_sinkhorn_iterate, verbose,
         x0_ptr, dual_ptr,
         false, false
     );

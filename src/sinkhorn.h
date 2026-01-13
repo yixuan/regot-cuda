@@ -13,7 +13,8 @@ void cuda_sinkhorn_bcd(
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max, double shift_max, int pattern_cycle, int verbose,
+    double density_max, double shift_max,
+    int sparsity_pattern_cycle, bool compute_sinkhorn_iterate, int verbose,
     const double* x0 = nullptr, double* dual = nullptr,
     bool input_on_device = false, bool output_on_device = false
 );
