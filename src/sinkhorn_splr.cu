@@ -465,7 +465,7 @@ public:
 
     // More-Thuente line search with Wolfe conditions
     double line_search_wolfe(
-        double init_step, double cur_obj, bool& recompute_fg,
+        double init_step, double cur_obj, double& new_obj, bool& recompute_fg,
         bool fixed_indices = false,
         double c1 = 1e-4, double c2 = 0.9, int max_iter = 20
     )
@@ -517,9 +517,10 @@ public:
         dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
         // Get g'(direc)
         dg = dot(d_grad, d_direc, m_Hsize);
+        new_obj = fx;
 
         // Convergence test
-        if (fx <= fx_init + step * test_decr && abs(dg) <= test_curv)
+        if (fx <= fx_init + step * test_decr && std::abs(dg) <= test_curv)
         {
             return step;
         }
@@ -606,9 +607,10 @@ public:
             axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
             dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
             dg = dot(d_grad, d_direc, m_Hsize);
+            new_obj = fx;
 
             // Convergence test
-            if (fx <= fx_init + step * test_decr && abs(dg) <= test_curv)
+            if (fx <= fx_init + step * test_decr && std::abs(dg) <= test_curv)
             {
                 return step;
             }
@@ -799,7 +801,7 @@ void cuda_sinkhorn_splr(
         // Otherwise, we need to recompute d_gamma, d_objfn, and d_grad
         bool recompute_fg = true;
         alpha = solver.line_search_wolfe(
-            std::min(1.0, 1.5 * alpha), objfn, recompute_fg, !update_pattern
+            std::min(1.0, 1.5 * alpha), objfn, objfn, recompute_fg, !update_pattern
         );
         timer_inner.toc("line_search");
 
@@ -813,9 +815,10 @@ void cuda_sinkhorn_splr(
         }
         timer_inner.toc("grad");
 
-        // Adjust density according to gnorm change
+        // Compute the new gradient norm
         const double gnorm_pre = gnorm;
         gnorm = solver.grad_norm();
+        // Adjust density according to gnorm change
         if (update_pattern)
         {
             const bool bad_move = (gnorm_pre < gnorm_init) && (gnorm > gnorm_pre);
