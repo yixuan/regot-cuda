@@ -768,7 +768,8 @@ public:
 void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
-    double density_max, double shift_max, int pattern_cycle, int verbose,
+    double density_max, double shift_max,
+    int sparsity_pattern_cycle, bool compute_sinkhorn_iterate, int verbose,
     const double* x0, double* dual,
     bool input_on_device, bool output_on_device
 )
@@ -784,8 +785,10 @@ void cuda_sinkhorn_splr(
     // Kmax -- maximum number of nonzero elements in sparsified T_t
     size_t Kmax = static_cast<size_t>(density_max * n * (m - 1));
     Kmax = std::max(Kmax, size_t(1));
-    // pattern_cycle -- cycle length of reusing sparsity pattern
-    // const int pattern_cycle = 30;
+    // sparsity_pattern_cycle -- cycle length of reusing sparsity pattern
+    // const int sparsity_pattern_cycle = 30;
+    // compute_sinkhorn_iterate -- compute Sinkhorn iterate to potentially accelerate convergence
+    // const bool compute_sinkhorn_iterate = true;
 
     // Create solver object
     SPLRSolver solver(M, a, b, reg, n, m, Kmax, input_on_device);
@@ -848,10 +851,10 @@ void cuda_sinkhorn_splr(
         // so we can fix the pattern for a few iterations and cyclically update it
         //
         // Below are flags to indicate whether we need to analyze or update the sparsity pattern
-        // in the current iteration (basically we update the pattern every `pattern_cycle` iterations
+        // in the current iteration (basically we update the pattern every `sparsity_pattern_cycle` iterations
         // and do the sparsity analysis in the next iteration)
-        const bool analyze_pattern = (iter % pattern_cycle == 0);
-        const bool update_pattern = (iter % pattern_cycle == (pattern_cycle - 1));
+        const bool analyze_pattern = (iter % sparsity_pattern_cycle == 0);
+        const bool update_pattern = (iter % sparsity_pattern_cycle == (sparsity_pattern_cycle - 1));
 
         // When we need to analyze the sparsity pattern in this iteration,
         // we also compute the Sinkhorn iterate, since the majority of the pattern analysis
@@ -862,7 +865,7 @@ void cuda_sinkhorn_splr(
         // The Sinkhorn iterate is a candidate for the next move. For example, we can
         // compare the objective function value and gradient of both the Sinkhorn iterate
         // and the quasi-Newton iterate, and then decide which one is the next move
-        if (analyze_pattern)
+        if (analyze_pattern && compute_sinkhorn_iterate)
         {
             // This part will run roughly at the same time as the analysis stage of
             // the sparse Cholesky decomposition
@@ -907,7 +910,7 @@ void cuda_sinkhorn_splr(
         // If analyze_pattern is true, it means that we have also computed the Sinkhorn iterate
         // If it is better than the quasi-Newton direction (both objfn and gnorm are smaller),
         // then we overwrite gamma with the Sinkhorn iterate
-        if (analyze_pattern)
+        if (analyze_pattern && compute_sinkhorn_iterate)
         {
             double objfn_bcd, gnorm_bcd;
             solver.objfn_gnorm_bcd(objfn_bcd, gnorm_bcd);
