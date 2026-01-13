@@ -46,6 +46,8 @@ void sparse_cholesky_solve_host(
 class SparseCholeskySolver
 {
 private:
+    // CUDA stream
+    cudaStream_t  m_stream;
     // cuDSS data structures
     cudssHandle_t m_handle;
     cudssConfig_t m_config;
@@ -65,6 +67,11 @@ public:
     );
     void set_b(double* d_rhs, int n);
     void set_x(double* d_sol, int n);
+
+    // reorder() and symfac() are mainly for debugging purposes
+    // analyze() is basically a combination of reorder() and symfac()
+    void reorder();
+    void symfac();
 
     // Symbolic analysis
     void analyze();

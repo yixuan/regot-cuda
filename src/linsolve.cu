@@ -35,11 +35,16 @@ SparseCholeskySolver::SparseCholeskySolver()
 
     // Data object creation
     CUDSS_CHECK(cudssDataCreate(m_handle, &m_data));
+
+    // Set CUDA stream
+    CUDA_CHECK(cudaStreamCreate(&m_stream));
+    CUDSS_CHECK(cudssSetStream(m_handle, m_stream));
 }
 
 SparseCholeskySolver::~SparseCholeskySolver()
 {
     // Cleanup
+    CUDA_CHECK(cudaStreamDestroy(m_stream));
     CUDSS_CHECK(cudssMatrixDestroy(m_mat_A));
     CUDSS_CHECK(cudssMatrixDestroy(m_vec_x));
     CUDSS_CHECK(cudssMatrixDestroy(m_vec_b));
@@ -77,6 +82,22 @@ void SparseCholeskySolver::set_x(double* d_sol, int n)
         &m_vec_x, n, 1, n,
         d_sol,
         CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
+    ));
+}
+
+void SparseCholeskySolver::reorder()
+{
+    CUDSS_CHECK(cudssExecute(
+        m_handle, CUDSS_PHASE_REORDERING, m_config, m_data,
+        m_mat_A, m_vec_x, m_vec_b
+    ));
+}
+
+void SparseCholeskySolver::symfac()
+{
+    CUDSS_CHECK(cudssExecute(
+        m_handle, CUDSS_PHASE_SYMBOLIC_FACTORIZATION, m_config, m_data,
+        m_mat_A, m_vec_x, m_vec_b
     ));
 }
 
