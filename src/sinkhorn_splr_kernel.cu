@@ -455,7 +455,8 @@ void launch_T_computation(
     bool write_values_and_indices,
     double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
     double* d_objfn, double* d_grad,
-    double* d_Tvalues, int* d_Tflatind
+    double* d_Tvalues, int* d_Tflatind,
+    cudaStream_t stream = cudaStreamPerThread
 )
 {
     // Pointer aliases
@@ -463,10 +464,10 @@ void launch_T_computation(
     const double* d_beta = d_gamma + n;
 
     // Zero out the reduction arrays
-    CUDA_CHECK(cudaMemset(d_Trowsums, 0, n * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_Tcolsums, 0, m * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_Tsum, 0, sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_objfn, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_Trowsums, 0, n * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_Tcolsums, 0, m * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_Tsum, 0, sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_objfn, 0, sizeof(double), stream));
 
     // Compute dimensions
     dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
@@ -480,7 +481,7 @@ void launch_T_computation(
     gridDim.y = heuristic_num_blocks(gridDim.x, gridDim.y);
 
     // Launch the fused kernel
-    T_fused_kernel<<<gridDim, blockDim>>>(
+    T_fused_kernel<<<gridDim, blockDim, 0, stream>>>(
         d_alpha, d_beta, d_M, reg, n, m, write_values_and_indices,
         d_Trowsums, d_Tcolsums, d_Tsum, d_Tvalues, d_Tflatind
     );
@@ -488,7 +489,7 @@ void launch_T_computation(
     // Compute objfn and grad
     dim3 threadsPerBlock(BLOCK_DIM);
     dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock>>>(
+    obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock, 0, stream>>>(
         d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
         reg, n, m,
         d_objfn, d_grad
@@ -516,7 +517,8 @@ void launch_H_sparsification(
     int n, int m, int K,
     double shift,
     double* d_Hvalues,
-    int* d_Hflatind
+    int* d_Hflatind,
+    cudaStream_t stream = cudaStreamPerThread
 )
 {
     // Total number of T elements
@@ -531,12 +533,17 @@ void launch_H_sparsification(
     // and get the corresponding elements in d_Tflatind
     // The results are written to d_Hvalues and d_Hflatind, respectively
 
+    // Prepare CUDA stream
+    cuda::stream_ref stream_ref{stream};
+
     // Set required environment
     auto requirements = cuda::execution::require(
         cuda::execution::determinism::not_guaranteed,
         cuda::execution::output_ordering::unsorted
     );
-    auto env = cuda::std::execution::env{requirements};
+
+    // Create the environment with the stream and requirements
+    auto env = cuda::std::execution::env{stream_ref, requirements};
 
     // Get memory size for DeviceTopK
     void* d_temp_storage = nullptr;
@@ -564,7 +571,7 @@ void launch_H_sparsification(
     // Add diagonal elements of Hsl to (d_Hvalues, d_Hflatind)
     dim3 threadsPerBlock(BLOCK_DIM);
     dim3 numBlocks_write_diagonal((Hsize + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock>>>(
+    write_diagonal_kernel<<<numBlocks_write_diagonal, threadsPerBlock, 0, stream>>>(
         d_Trowsums, d_Tcolsums, shift, n, m, d_Hvalues + Ks, d_Hflatind + Ks
     );
 
@@ -573,7 +580,9 @@ void launch_H_sparsification(
     thrust::device_ptr<int> d_Hflatind_ptr = thrust::device_pointer_cast(d_Hflatind);
 
     // Call thrust::sort_by_key to sort d_Hflatind in ascending order
+    auto policy = thrust::cuda::par.on(stream);
     thrust::sort_by_key(
+        policy,
         d_Hflatind_ptr,
         d_Hflatind_ptr + (Ks + Hsize),
         d_Hvalues_ptr
@@ -683,13 +692,14 @@ void launch_csr_conversion(
     int* d_Hcolind,
     int* d_Hrowptr,
     int* d_row_counts,
-    int K, int n, int m
+    int K, int n, int m,
+    cudaStream_t stream = cudaStreamPerThread
 )
 {
     // Initialize d_row_counts to zero vector
     int Hsize = n + m - 1;
     int nnz = K + Hsize;
-    CUDA_CHECK(cudaMemset(d_row_counts, 0, Hsize * sizeof(int)));
+    CUDA_CHECK(cudaMemsetAsync(d_row_counts, 0, Hsize * sizeof(int), stream));
 
     // Extract column indices and count the number of elements per row
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -699,7 +709,7 @@ void launch_csr_conversion(
     // will handle larger sizes
     numBlocks.x = heuristic_num_blocks(numBlocks.x);
 
-    extract_columns_and_count_kernel<<<numBlocks, threadsPerBlock>>>(
+    extract_columns_and_count_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_Hflatind, d_Hcolind, d_row_counts, nnz, Hsize
     );
 
@@ -707,18 +717,18 @@ void launch_csr_conversion(
     // [a, b, c] -> [a, a + b, a + b + c]
 
     // The first element of row pointer is always zero
-    CUDA_CHECK(cudaMemset(d_Hrowptr, 0, sizeof(int)));
+    CUDA_CHECK(cudaMemsetAsync(d_Hrowptr, 0, sizeof(int), stream));
     // Get memory size for InclusiveSum
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
-        d_temp_storage, temp_storage_bytes, d_row_counts, d_Hrowptr + 1, Hsize
+        d_temp_storage, temp_storage_bytes, d_row_counts, d_Hrowptr + 1, Hsize, stream
     ));
     // Allocate memory
     CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
     // Run InclusiveSum
     CUDA_CHECK(cub::DeviceScan::InclusiveSum(
-        d_temp_storage, temp_storage_bytes, d_row_counts, d_Hrowptr + 1, Hsize
+        d_temp_storage, temp_storage_bytes, d_row_counts, d_Hrowptr + 1, Hsize, stream
     ));
     // Free memory
     CUDA_CHECK(cudaFree(d_temp_storage));
@@ -757,7 +767,8 @@ void launch_objfn_grad_sphess(
     double* d_Hvalues, int* d_Hflatind, int* d_Hcolind, int* d_Hrowptr,
     double* d_work, int* d_iwork,
     bool stage1 = true, bool stage2 = true,
-    bool fixed_indices = false
+    bool fixed_indices = false,
+    cudaStream_t stream = cudaStreamPerThread
 )
 {
     // Pointer aliases
@@ -780,7 +791,8 @@ void launch_objfn_grad_sphess(
             write_values_and_indices,
             d_Trowsums, d_Tcolsums, d_Tsum,
             d_objfn, d_grad,
-            d_Tvalues, d_Tflatind
+            d_Tvalues, d_Tflatind,
+            stream
         );
     }
 
@@ -807,7 +819,7 @@ void launch_objfn_grad_sphess(
             // will handle larger sizes
             numBlocks = heuristic_num_blocks(numBlocks);
             dim3 numBlocks_recompute_nonzero_values(numBlocks);
-            recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock>>>(
+            recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock, 0, stream>>>(
                 d_Hflatind, d_Trowsums, d_Tcolsums, d_alpha, d_beta, d_M,
                 reg, shift, n, m, Ks, d_Hvalues
             );
@@ -820,7 +832,8 @@ void launch_objfn_grad_sphess(
                 d_Tvalues, d_Tflatind,
                 d_Trowsums, d_Tcolsums,
                 n, m, Ks, shift,
-                d_Hvalues, d_Hflatind
+                d_Hvalues, d_Hflatind,
+                stream
             );
         }
 
@@ -830,7 +843,7 @@ void launch_objfn_grad_sphess(
         // d_iwork for the working space
         int* d_row_counts = d_iwork;
         launch_csr_conversion(
-            d_Hflatind, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m
+            d_Hflatind, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m, stream
         );
     }
 }

@@ -48,7 +48,8 @@ void launch_objfn_grad_sphess(
     double* d_Hvalues, int* d_Hflatind, int* d_Hcolind, int* d_Hrowptr,
     double* d_work, int* d_iwork,
     bool stage1 = true, bool stage2 = true,
-    bool fixed_indices = false
+    bool fixed_indices = false,
+    cudaStream_t stream = cudaStreamPerThread
 );
 
 // Helper function to compute low-rank vectors y and s
