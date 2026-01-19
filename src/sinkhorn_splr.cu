@@ -8,13 +8,6 @@
 // Annotate code blocks for profiling
 #include <nvtx3/nvtx3.hpp>
 
-// Thrust headers
-#include <thrust/device_vector.h>
-#include <thrust/transform.h>
-#include <thrust/functional.h>
-#include <thrust/iterator/constant_iterator.h>
-#include <thrust/inner_product.h>
-
 // Utility functions
 #include "utils.h"
 #include "timer.h"
@@ -479,12 +472,7 @@ public:
         timer.toc("low_rank");
 
         // Scaling d <- -reg * x
-        thrust::constant_iterator<double> constant_iter(-m_reg);
-        thrust::device_ptr<double> d_direc_ptr = thrust::device_pointer_cast(d_direc);
-        thrust::transform(
-            d_direc_ptr, d_direc_ptr + m_Hsize, constant_iter, d_direc_ptr,
-            thrust::multiplies<double>()
-        );
+        compute_scaling_inplace_cuda(-m_reg, d_direc, m_Hsize, stream);
         timer.toc("scaling");
 
         if (verbose >= 3)
