@@ -33,6 +33,7 @@
 
 // Helper function to transform the gamma=(alpha, beta) vector to gamma'=(alpha', beta_t', 0)
 // alpha += beta[m-1], beta -= beta[m-1]
+// From sinkhorn_splr_kernel.cu
 void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStreamPerThread);
 
 // Helper function to compute objective function value objfn,
@@ -757,7 +758,7 @@ void cuda_sinkhorn_splr(
     const double* M, const double* a, const double* b, double* P,
     double reg, int max_iter, double tol, int n, int m, int* niter,
     double density_max, double shift_max,
-    int sparsity_pattern_cycle, bool compute_sinkhorn_iterate, int verbose,
+    int sparsity_pattern_cycle, int candidate_sinkhorn_iter, int verbose,
     const double* x0, double* dual,
     bool input_on_device, bool output_on_device
 )
@@ -775,8 +776,9 @@ void cuda_sinkhorn_splr(
     Kmax = std::max(Kmax, size_t(1));
     // sparsity_pattern_cycle -- cycle length of reusing sparsity pattern
     // const int sparsity_pattern_cycle = 30;
-    // compute_sinkhorn_iterate -- compute Sinkhorn iterate to potentially accelerate convergence
-    // const bool compute_sinkhorn_iterate = true;
+    // candidate_sinkhorn_iter -- number of Sinkhorn iterations used to generate candidate iterate
+    //                            to potentially accelerate convergence
+    // const int candidate_sinkhorn_iter = 3;
 
     // Create solver object
     SPLRSolver solver(M, a, b, reg, n, m, Kmax, input_on_device);
@@ -853,11 +855,11 @@ void cuda_sinkhorn_splr(
         // The Sinkhorn iterate is a candidate for the next move. For example, we can
         // compare the objective function value and gradient of both the Sinkhorn iterate
         // and the quasi-Newton iterate, and then decide which one is the next move
-        if (analyze_pattern && compute_sinkhorn_iterate)
+        if (analyze_pattern && candidate_sinkhorn_iter > 0)
         {
             // This part will run roughly at the same time as the analysis stage of
             // the sparse Cholesky decomposition
-            solver.compute_sinkhorn_iterate(3);
+            solver.compute_sinkhorn_iterate(candidate_sinkhorn_iter);
         }
         solver.compute_search_direc(nnz, ys, low_rank, analyze_pattern, verbose);
         timer_inner.toc("search_direc");
@@ -900,7 +902,7 @@ void cuda_sinkhorn_splr(
         // If analyze_pattern is true, it means that we have also computed the Sinkhorn iterate
         // If it is better than the quasi-Newton direction (both objfn and gnorm are smaller),
         // then we overwrite gamma with the Sinkhorn iterate
-        if (analyze_pattern && compute_sinkhorn_iterate)
+        if (analyze_pattern && candidate_sinkhorn_iter > 0)
         {
             double objfn_bcd, gnorm_bcd;
             solver.objfn_gnorm_bcd(objfn_bcd, gnorm_bcd);

@@ -193,11 +193,11 @@ py::dict sinkhorn_splr(
         sparsity_pattern_cycle = py::cast<int>(kwargs["sparsity_pattern_cycle"]);
     }
 
-    // Get compute_sinkhorn_iterate from kwargs
-    bool compute_sinkhorn_iterate = true;
-    if (kwargs.contains("compute_sinkhorn_iterate"))
+    // Get candidate_sinkhorn_iter from kwargs
+    int candidate_sinkhorn_iter = 3;
+    if (kwargs.contains("candidate_sinkhorn_iter"))
     {
-        compute_sinkhorn_iterate = py::cast<bool>(kwargs["compute_sinkhorn_iterate"]);
+        candidate_sinkhorn_iter = py::cast<int>(kwargs["candidate_sinkhorn_iter"]);
     }
 
     // Create output arrays
@@ -215,7 +215,7 @@ py::dict sinkhorn_splr(
         M_ptr, a_ptr, b_ptr, P_ptr,
         reg, max_iter, tol, n, m, &niter,
         density_max, shift_max,
-        sparsity_pattern_cycle, compute_sinkhorn_iterate, verbose,
+        sparsity_pattern_cycle, candidate_sinkhorn_iter, verbose,
         x0_ptr, dual_ptr,
         false, false
     );
