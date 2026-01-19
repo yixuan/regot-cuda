@@ -70,7 +70,8 @@ void launch_low_rank(
     double* d_s,
     double& ys,
     double& yy,
-    int size
+    int size,
+    cudaStream_t stream = cudaStreamPerThread
 );
 
 // Helper function to compute search direction with low-rank terms
@@ -83,7 +84,8 @@ void launch_low_rank_search_direc(
     const double* d_s,
     const double ys,
     const double reg,
-    int size
+    int size,
+    cudaStream_t stream = cudaStreamPerThread
 );
 
 // Class for the SPLR solver
@@ -203,7 +205,7 @@ public:
         compute_log_vector_cuda(d_ab, d_logab, m_n + m_m);
 
         // Set d_grad_prev to zero
-        CUDA_CHECK(cudaMemset(d_grad_prev, 0, m_Hsize * sizeof(double)));
+        CUDA_CHECK(cudaMemsetAsync(d_grad_prev, 0, m_Hsize * sizeof(double), cudaStreamPerThread));
     }
 
     // Destructor
@@ -247,7 +249,7 @@ public:
         // Optimal alpha given beta
         // d_alpha = d_gamma
         // d_beta = d_gamma + n
-        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha, m_reg, m_n, m_m);
+        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha, m_reg, m_n, m_m, cudaStreamPerThread);
     }
 
     // Sinkhorn iteration to update beta
@@ -259,7 +261,7 @@ public:
         // Optimal beta given alpha
         // d_alpha = d_gamma
         // d_beta = d_gamma + n
-        compute_optimal_beta(d_M, d_alpha, d_logb, d_beta, m_reg, m_n, m_m);
+        compute_optimal_beta(d_M, d_alpha, d_logb, d_beta, m_reg, m_n, m_m, cudaStreamPerThread);
     }
 
     // Initialize dual variables
@@ -280,18 +282,18 @@ public:
                 input_on_device ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice
             ));
             // Shift d_gamma
-            shift_gamma(d_gamma, m_n, m_m);
+            shift_gamma(d_gamma, m_n, m_m, cudaStreamPerThread);
         }
         else
         {
             // If no initial values are provided, first set beta to zero,
             // and then compute alpha using BCD iteration
-            CUDA_CHECK(cudaMemset(d_beta, 0, m_m * sizeof(double)));
+            CUDA_CHECK(cudaMemsetAsync(d_beta, 0, m_m * sizeof(double), cudaStreamPerThread));
             update_alpha();
         }
 
         // Initialize dual variable in previous iteration
-        CUDA_CHECK(cudaMemset(d_gamma_prev, 0, (m_n + m_m) * sizeof(double)));
+        CUDA_CHECK(cudaMemsetAsync(d_gamma_prev, 0, (m_n + m_m) * sizeof(double), cudaStreamPerThread));
     }
 
     // Compute objective function value, gradient, and sparsified Hessian
@@ -322,7 +324,8 @@ public:
             d_Hvalues, d_Hflatind, d_Hcolind, d_Hrowptr,
             d_work, d_iwork,
             stage1, stage2,
-            fixed_indices
+            fixed_indices,
+            cudaStreamPerThread
         );
 
         // Copy d_objfn to host
@@ -338,7 +341,7 @@ public:
     {
         nvtx3::scoped_range r{"grad_norm"};
 
-        return compute_l2_norm_cuda(d_grad, m_Hsize);
+        return compute_l2_norm_cuda(d_grad, m_Hsize, cudaStreamPerThread);
     }
 
     // Compute low-rank vectors
@@ -350,7 +353,7 @@ public:
         // s = gamma - gamma_prev
         // ys = y's
         // yy = y'y
-        launch_low_rank(d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, ys, yy, m_Hsize);
+        launch_low_rank(d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, ys, yy, m_Hsize, cudaStreamPerThread);
     }
 
     // Compute Sinkhorn iterate
@@ -394,7 +397,7 @@ public:
     {
         nvtx3::scoped_range r{"objfn_gnorm_bcd"};
 
-        gnorm = compute_l2_norm_cuda(d_grad_bcd, m_Hsize);
+        gnorm = compute_l2_norm_cuda(d_grad_bcd, m_Hsize, cudaStreamPerThread);
         CUDA_CHECK(cudaMemcpy(&objfn, d_objfn_bcd, sizeof(double), cudaMemcpyDeviceToHost));
     }
 
@@ -433,6 +436,7 @@ public:
         // direc = invA_g = inv(A) * g;
         Timer timer(verbose >= 3);
         timer.tic();
+        cudaStream_t stream = m_linsolver.get_cuda_stream();
         m_linsolver.set_A(d_Hvalues, d_Hcolind, d_Hrowptr, m_Hsize, nnz);
         m_linsolver.set_b(d_grad, m_Hsize);
         m_linsolver.set_x(d_direc, m_Hsize);
@@ -470,7 +474,7 @@ public:
             // yinvAy = y'(invA_y), yinvAg = y'(invA_g) = y'(direc)
             // sg_ys = sg / ys
             // direc += ((1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
-            launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_reg, m_Hsize);
+            launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_reg, m_Hsize, stream);
         }
         timer.toc("low_rank");
 
@@ -525,7 +529,7 @@ public:
 
         // Initial step size
         double step = init_step, step_max = 2.0;
-        double fx = cur_obj, dg = compute_dot_prod_cuda(d_grad_prev, d_direc, m_Hsize);
+        double fx = cur_obj, dg = compute_dot_prod_cuda(d_grad_prev, d_direc, m_Hsize, cudaStreamPerThread);
 
         // Save the function value at the current x
         const double fx_init = cur_obj;
@@ -552,12 +556,12 @@ public:
 
         // Evaluate the current step size
         // gamma = gamma_prev + step * direc
-        compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize);
+        compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize, cudaStreamPerThread);
         // We only compute f and g, so label stage1 = true, stage2 = false
         // In this case shift and K are not used
         dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
         // Get g'(direc)
-        dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize);
+        dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize, cudaStreamPerThread);
         new_obj = fx;
 
         // Convergence test
@@ -645,9 +649,9 @@ public:
             }
 
             // Update parameter, function value, and gradient
-            compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize);
+            compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize, cudaStreamPerThread);
             dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
-            dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize);
+            dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize, cudaStreamPerThread);
             new_obj = fx;
 
             // Convergence test
@@ -710,7 +714,7 @@ public:
     {
         nvtx3::scoped_range r{"update_gamma"};
 
-        compute_axpy_cuda(d_direc, d_gamma_prev, alpha, d_gamma, m_Hsize);
+        compute_axpy_cuda(d_direc, d_gamma_prev, alpha, d_gamma, m_Hsize, cudaStreamPerThread);
     }
 
     // Update gamma using the Sinkhorn iterate
@@ -875,7 +879,9 @@ void cuda_sinkhorn_splr(
         solver.save_history();
 
         // Let Sinkhorn and quasi-Newton computation synchronize here
-        CUDA_CHECK(cudaDeviceSynchronize());
+        // CUDA_CHECK(cudaDeviceSynchronize());
+        // In fact, the cudaMemcpy() function in solver.save_history() will implicitly synchronize,
+        // so we do not need to explicitly call cudaDeviceSynchronize() here
 
         // Wolfe Line Search
         // Will overwrite d_gamma, d_objfn, and d_grad

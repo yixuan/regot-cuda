@@ -985,7 +985,8 @@ void launch_low_rank(
     double* d_s,
     double& ys,
     double& yy,
-    int size
+    int size,
+    cudaStream_t stream = cudaStreamPerThread
 )
 {
     // Allocate device memory for scalars
@@ -995,8 +996,8 @@ void launch_low_rank(
     CUDA_CHECK(cudaMalloc(&d_yy, sizeof(double)));
 
     // Initialize to zero
-    CUDA_CHECK(cudaMemset(d_ys, 0, sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_yy, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_ys, 0, sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_yy, 0, sizeof(double), stream));
 
     // Call kernel function
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -1004,7 +1005,7 @@ void launch_low_rank(
     // Limit number of blocks to 256
     // The grid-stride loop in low_rank_fused_kernel() will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
-    low_rank_fused_kernel<<<numBlocks, threadsPerBlock>>>(
+    low_rank_fused_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, d_ys, d_yy, size
     );
 
@@ -1131,7 +1132,8 @@ void launch_low_rank_search_direc(
     const double* d_s,
     const double ys,
     const double reg,
-    int size
+    int size,
+    cudaStream_t stream = cudaStreamPerThread
 )
 {
     // Allocate workspace
@@ -1139,7 +1141,7 @@ void launch_low_rank_search_direc(
     CUDA_CHECK(cudaMalloc(&d_work, 3 * sizeof(double)));
 
     // Initialize to zero
-    CUDA_CHECK(cudaMemset(d_work, 0, 3 * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_work, 0, 3 * sizeof(double), stream));
 
     // Call first kernel function
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -1147,13 +1149,13 @@ void launch_low_rank_search_direc(
     // Limit number of blocks to 256
     // The grid-stride loop in search_direc_dot_kernel() will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
-    search_direc_dot_kernel<<<numBlocks, threadsPerBlock>>>(
+    search_direc_dot_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_s, d_g, d_y, d_invA_y, d_direc, 
         d_work, size
     );
 
     // Call second kernel function
-    update_direc_kernel<<<numBlocks, threadsPerBlock>>>(
+    update_direc_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_direc, d_invA_y, d_s, 
         d_work, ys, reg, size
     );
@@ -1183,8 +1185,8 @@ void T_computation_sparsify_host(
     size_t Te = n * (m - 1);
 
     // Bound check for K
-    size_t Ks = max(K, 1);
-    Ks = min(Ks, Te);
+    size_t Ks = std::max(K, 1);
+    Ks = std::min(Ks, Te);
 
     // Size of Hsl
     size_t Hsize = n + m - 1;
