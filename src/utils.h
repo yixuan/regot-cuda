@@ -9,15 +9,17 @@
 
 // Vector functions
 // ||v1 - v2||_2
-double compute_l2_distance_cuda(const double* d_vec1, const double* d_vec2, int size);
+double compute_l2_distance_cuda(const double* d_vec1, const double* d_vec2, int size, cudaStream_t stream = cudaStreamPerThread);
 // ||v||_2
-double compute_l2_norm_cuda(const double* d_vec, int size);
+double compute_l2_norm_cuda(const double* d_vec, int size, cudaStream_t stream = cudaStreamPerThread);
 // log(x)
-void compute_log_vector_cuda(const double* d_x, double* d_logx, int size);
+void compute_log_vector_cuda(const double* d_x, double* d_logx, int size, cudaStream_t stream = cudaStreamPerThread);
+// x <- a * x
+void compute_scaling_inplace_cuda(double a, double* d_x, int size, cudaStream_t stream = cudaStreamPerThread);
 // z = a * x + y
-void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d_z, int size);
+void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d_z, int size, cudaStream_t stream = cudaStreamPerThread);
 // x'y
-double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size);
+double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size, cudaStream_t stream = cudaStreamPerThread);
 
 // Use heuristics to set the total number of blocks
 inline int heuristic_num_blocks()

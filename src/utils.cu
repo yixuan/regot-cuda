@@ -101,12 +101,12 @@ __global__ void compute_squared_l2_distance_kernel(
 }
 
 // Helper function to compute the l2 distance between vectors on device
-double compute_l2_distance_cuda(const double* d_vec1, const double* d_vec2, int size)
+double compute_l2_distance_cuda(const double* d_vec1, const double* d_vec2, int size, cudaStream_t stream)
 {
     // Initialize result to zero
     double* d_result;
     CUDA_CHECK(cudaMalloc(&d_result, sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_result, 0, sizeof(double), stream));
 
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
@@ -115,7 +115,7 @@ double compute_l2_distance_cuda(const double* d_vec1, const double* d_vec2, int 
     // will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
 
-    compute_squared_l2_distance_kernel<<<numBlocks, threadsPerBlock>>>(
+    compute_squared_l2_distance_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_vec1, d_vec2, d_result, size
     );
 
@@ -163,12 +163,12 @@ __global__ void compute_squared_l2_norm_kernel(
 }
 
 // Helper function to compute the l2 norm of a vector on device
-double compute_l2_norm_cuda(const double* d_vec, int size)
+double compute_l2_norm_cuda(const double* d_vec, int size, cudaStream_t stream)
 {
     // Initialize result to zero
     double* d_result;
     CUDA_CHECK(cudaMalloc(&d_result, sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_result, 0, sizeof(double), stream));
 
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
@@ -177,7 +177,7 @@ double compute_l2_norm_cuda(const double* d_vec, int size)
     // will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
 
-    compute_squared_l2_norm_kernel<<<numBlocks, threadsPerBlock>>>(
+    compute_squared_l2_norm_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_vec, d_result, size
     );
 
@@ -210,7 +210,7 @@ __global__ void compute_log_vector_kernel(
 }
 
 // Helper function to compute elementwise logarithm of a vector on device
-void compute_log_vector_cuda(const double* d_x, double* d_logx, int size)
+void compute_log_vector_cuda(const double* d_x, double* d_logx, int size, cudaStream_t stream)
 {
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
@@ -219,8 +219,44 @@ void compute_log_vector_cuda(const double* d_x, double* d_logx, int size)
     // will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
 
-    compute_log_vector_kernel<<<numBlocks, threadsPerBlock>>>(
+    compute_log_vector_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_x, d_logx, size
+    );
+}
+
+// CUDA kernel for computing x <- a * x
+__global__ void compute_scaling_inplace_kernel(
+    double a,
+    double* __restrict__ x,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    // Grid-stride loop
+    // Similar to "if (idx < size)" but handles arbitrary vector size
+    // Even if size > blockDim * gridDim, the loop will cover all elements
+    for (int i = idx; i < size; i += stride)
+    {
+        x[i] *= a;
+    }
+}
+
+// Helper function to compute x <- a * x on device
+void compute_scaling_inplace_cuda(double a, double* d_x, int size, cudaStream_t stream)
+{
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in compute_scaling_inplace_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+
+    compute_scaling_inplace_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
+        a, d_x, size
     );
 }
 
@@ -248,7 +284,7 @@ __global__ void compute_axpy_kernel(
 }
 
 // Helper function to compute z = a * x + y on device
-void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d_z, int size)
+void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d_z, int size, cudaStream_t stream)
 {
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
@@ -257,7 +293,7 @@ void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d
     // will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
 
-    compute_axpy_kernel<<<numBlocks, threadsPerBlock>>>(
+    compute_axpy_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_x, d_y, a, d_z, size
     );
 }
@@ -298,12 +334,12 @@ __global__ void compute_dot_prod_kernel(
 }
 
 // Helper function to compute inner product x'y on device
-double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size)
+double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size, cudaStream_t stream)
 {
     // Initialize result to zero
     double* d_result;
     CUDA_CHECK(cudaMalloc(&d_result, sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_result, 0, sizeof(double), stream));
 
     dim3 threadsPerBlock(BLOCK_DIM);
     int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
@@ -312,7 +348,7 @@ double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size)
     // will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
 
-    compute_dot_prod_kernel<<<numBlocks, threadsPerBlock>>>(
+    compute_dot_prod_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
         d_x, d_y, d_result, size
     );
 
