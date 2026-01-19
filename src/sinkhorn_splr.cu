@@ -5,6 +5,9 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
+// Annotate code blocks for profiling
+#include <nvtx3/nvtx3.hpp>
+
 // Thrust headers
 #include <thrust/device_vector.h>
 #include <thrust/transform.h>
@@ -176,6 +179,8 @@ public:
         m_n(n), m_m(m), m_Me(n * m), m_Te(n * (m - 1)), m_Hsize(n + m - 1), m_Kmax(Kmax), m_reg(reg),
         d_M_storage(nullptr)
     {
+        nvtx3::scoped_range r{"SPLRSolver"};
+
         // If M is already on the device, then directly assign M to d_M
         // Otherwise, allocate device memory and copy from the host pointer
         double *d_M_storage = nullptr;
@@ -239,6 +244,8 @@ public:
     // Destructor
     ~SPLRSolver()
     {
+        nvtx3::scoped_range r{"~SPLRSolver"};
+
         // Free device memory
         if (d_M_storage != nullptr)
         {
@@ -293,6 +300,8 @@ public:
     // Initialize dual variables
     void init_dual(const double* x0, bool input_on_device = false)
     {
+        nvtx3::scoped_range r{"init_dual"};
+
         // Initialize dual variable gamma
         if (x0 != nullptr)
         {
@@ -329,6 +338,8 @@ public:
         bool fixed_indices = false
     )
     {
+        nvtx3::scoped_range r{"dual_objfn_grad_sphess"};
+
         // Make sure density is within (0, 1)
         density = std::min(density, 1.0);
         density = std::max(density, 0.0);
@@ -360,12 +371,16 @@ public:
     // Get current gradient norm
     double grad_norm() const
     {
+        nvtx3::scoped_range r{"grad_norm"};
+
         return compute_l2_norm_cuda(d_grad, m_Hsize);
     }
 
     // Compute low-rank vectors
     void compute_low_rank(double& ys, double& yy)
     {
+        nvtx3::scoped_range r{"compute_low_rank"};
+
         // y = grad - grad_prev
         // s = gamma - gamma_prev
         // ys = y's
@@ -377,6 +392,8 @@ public:
     // This will be parallel to compute_search_direc()
     void compute_sinkhorn_iterate(int niter = 3)
     {
+        nvtx3::scoped_range r{"compute_sinkhorn_iterate"};
+
         const double* d_loga = d_logab;
         const double* d_logb = d_logab + m_n;
         double* d_alpha_bcd = d_gamma_bcd;
@@ -410,6 +427,8 @@ public:
     // Get objective function value and gradient norm of the Sinkhorn iterate
     void objfn_gnorm_bcd(double& objfn, double& gnorm) const
     {
+        nvtx3::scoped_range r{"objfn_gnorm_bcd"};
+
         gnorm = compute_l2_norm_cuda(d_grad_bcd, m_Hsize);
         CUDA_CHECK(cudaMemcpy(&objfn, d_objfn_bcd, sizeof(double), cudaMemcpyDeviceToHost));
     }
@@ -417,6 +436,8 @@ public:
     // Compute search direction (with low-rank term)
     void compute_search_direc(size_t nnz, double ys, bool low_rank = true, bool analyze_pattern = true, int verbose = 0)
     {
+        nvtx3::scoped_range r{"compute_search_direc"};
+
         // Solve (H + UCV) * d = -g
         // U = [u, v], C = diag(a, b), V = U'
         // u = y, v = H * s
@@ -510,6 +531,8 @@ public:
     // Save d_gamma to d_gamma_prev, and d_grad to d_grad_prev
     void save_history()
     {
+        nvtx3::scoped_range r{"save_history"};
+
         CUDA_CHECK(cudaMemcpy(d_gamma_prev, d_gamma, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
         CUDA_CHECK(cudaMemcpy(d_grad_prev, d_grad, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
     }
@@ -521,6 +544,8 @@ public:
         double c1 = 1e-4, double c2 = 0.9, int max_iter = 20
     )
     {
+        nvtx3::scoped_range r{"line_search_wolfe"};
+
         // We assume d_gamma has been copied to d_gamma_prev,
         // so new point is computed as
         //     d_gamma = d_gamma_prev + step * d_direc
@@ -718,18 +743,24 @@ public:
     // Update iterate, d_gamma = d_gamma_prev + alpha * d_direc
     void update_gamma(double alpha)
     {
+        nvtx3::scoped_range r{"update_gamma"};
+
         axpy(d_direc, d_gamma_prev, alpha, m_Hsize, d_gamma);
     }
 
     // Update gamma using the Sinkhorn iterate
     void update_gamma_sinkhorn()
     {
+        nvtx3::scoped_range r{"update_gamma_sinkhorn"};
+
         CUDA_CHECK(cudaMemcpy(d_gamma, d_gamma_bcd, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
     }
 
     // Output results to host -- transport plan and dual variables
     void output_result(double* P, double* dual, bool output_on_device = false)
     {
+        nvtx3::scoped_range r{"output_result"};
+
         // Copy (alpha, beta) to dual
         if (dual != nullptr)
         {
