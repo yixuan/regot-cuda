@@ -8,11 +8,16 @@
 #include <device_launch_parameters.h>
 
 // Vector functions
+// ||v1 - v2||_2
 double compute_l2_distance_cuda(const double* d_vec1, const double* d_vec2, int size);
+// ||v||_2
 double compute_l2_norm_cuda(const double* d_vec, int size);
+// log(x)
 void compute_log_vector_cuda(const double* d_x, double* d_logx, int size);
-
-
+// z = a * x + y
+void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d_z, int size);
+// x'y
+double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size);
 
 // Use heuristics to set the total number of blocks
 inline int heuristic_num_blocks()

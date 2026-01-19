@@ -202,14 +202,14 @@ __global__ void compute_log_vector_kernel(
 
     // Grid-stride loop
     // Similar to "if (idx < size)" but handles arbitrary vector size
-    // Even if size > gridDim * blockDim, the loop will cover all elements
+    // Even if size > blockDim * gridDim, the loop will cover all elements
     for (int i = idx; i < size; i += stride)
     {
         logx[i] = log(x[i]);
     }
 }
 
-// Helper function to compute elementwise logarithm of a vector
+// Helper function to compute elementwise logarithm of a vector on device
 void compute_log_vector_cuda(const double* d_x, double* d_logx, int size)
 {
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -222,4 +222,104 @@ void compute_log_vector_cuda(const double* d_x, double* d_logx, int size)
     compute_log_vector_kernel<<<numBlocks, threadsPerBlock>>>(
         d_x, d_logx, size
     );
+}
+
+// CUDA kernel for computing z = a * x + y
+__global__ void compute_axpy_kernel(
+    const double* __restrict__ x,
+    const double* __restrict__ y,
+    double a,
+    double* __restrict__ z,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    // Grid-stride loop
+    // Similar to "if (idx < size)" but handles arbitrary vector size
+    // Even if size > blockDim * gridDim, the loop will cover all elements
+    for (int i = idx; i < size; i += stride)
+    {
+        z[i] = a * x[i] + y[i];
+    }
+}
+
+// Helper function to compute z = a * x + y on device
+void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d_z, int size)
+{
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in compute_axpy_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+
+    compute_axpy_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_x, d_y, a, d_z, size
+    );
+}
+
+// CUDA kernel for computing inner product x'y
+__global__ void compute_dot_prod_kernel(
+    const double* __restrict__ x,
+    const double* __restrict__ y,
+    double* __restrict__ result,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    double dot_prod = 0.0;
+
+    // Grid-stride loop
+    // Similar to "if (idx < size)" but handles arbitrary vector size
+    for (int i = idx; i < size; i += stride)
+    {
+        dot_prod += x[i] * y[i];
+    }
+
+    // Intra-block reduce
+    // Sums up results within this block
+    // Stored in the first thread of the block
+    dot_prod = block_reduce_sum(dot_prod);
+
+    // The first thread of the block adds the block's sum to the global memory
+    if (tid == 0)
+    {
+        // result must be initialized to zero
+        atomicAdd(result, dot_prod);
+    }
+}
+
+// Helper function to compute inner product x'y on device
+double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size)
+{
+    // Initialize result to zero
+    double* d_result;
+    CUDA_CHECK(cudaMalloc(&d_result, sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_result, 0, sizeof(double)));
+
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in compute_dot_prod_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+
+    compute_dot_prod_kernel<<<numBlocks, threadsPerBlock>>>(
+        d_x, d_y, d_result, size
+    );
+
+    // Copy back to host
+    double result;
+    CUDA_CHECK(cudaMemcpy(&result, d_result, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_result));
+
+    return result;
 }

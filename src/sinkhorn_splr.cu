@@ -86,20 +86,6 @@ void launch_low_rank_search_direc(
     int size
 );
 
-// Functor for computing z = a * x + y
-template <typename T>
-struct axpy_functor
-{
-    T m_a;
-    axpy_functor(T a): m_a(a) {}
-
-    __host__ __device__
-    T operator()(const T& x, const T& y) const
-    {
-        return m_a * x + y;
-    }
-};
-
 // Class for the SPLR solver
 class SPLRSolver
 {
@@ -147,27 +133,6 @@ private:
     int*          d_iwork;
     // Sparse Cholesky solver
     SparseCholeskySolver m_linsolver;
-
-    // Simple dot product
-    inline double dot(const double* d_x, const double* d_y, int size) const
-    {
-        thrust::device_ptr<const double> d_x_ptr = thrust::device_pointer_cast(d_x);
-        thrust::device_ptr<const double> d_y_ptr = thrust::device_pointer_cast(d_y);
-        return thrust::inner_product(d_x_ptr, d_x_ptr + size, d_y_ptr, 0.0);
-    }
-
-    // Compute z = a * x + y
-    inline void axpy(const double* d_x, const double* d_y, double a, int size, double* d_z) const
-    {
-        thrust::device_ptr<const double> d_x_ptr = thrust::device_pointer_cast(d_x);
-        thrust::device_ptr<const double> d_y_ptr = thrust::device_pointer_cast(d_y);
-        thrust::device_ptr<double> d_z_ptr = thrust::device_pointer_cast(d_z);
-
-        thrust::transform(d_x_ptr, d_x_ptr + size,
-                          d_y_ptr,
-                          d_z_ptr,
-                          axpy_functor<double>(a));
-    }
 
 public:
     // Constructor
@@ -560,7 +525,7 @@ public:
 
         // Initial step size
         double step = init_step, step_max = 2.0;
-        double fx = cur_obj, dg = dot(d_grad_prev, d_direc, m_Hsize);
+        double fx = cur_obj, dg = compute_dot_prod_cuda(d_grad_prev, d_direc, m_Hsize);
 
         // Save the function value at the current x
         const double fx_init = cur_obj;
@@ -587,12 +552,12 @@ public:
 
         // Evaluate the current step size
         // gamma = gamma_prev + step * direc
-        axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
+        compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize);
         // We only compute f and g, so label stage1 = true, stage2 = false
         // In this case shift and K are not used
         dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
         // Get g'(direc)
-        dg = dot(d_grad, d_direc, m_Hsize);
+        dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize);
         new_obj = fx;
 
         // Convergence test
@@ -680,9 +645,9 @@ public:
             }
 
             // Update parameter, function value, and gradient
-            axpy(d_direc, d_gamma_prev, step, m_Hsize, d_gamma);
+            compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize);
             dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
-            dg = dot(d_grad, d_direc, m_Hsize);
+            dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize);
             new_obj = fx;
 
             // Convergence test
@@ -745,7 +710,7 @@ public:
     {
         nvtx3::scoped_range r{"update_gamma"};
 
-        axpy(d_direc, d_gamma_prev, alpha, m_Hsize, d_gamma);
+        compute_axpy_cuda(d_direc, d_gamma_prev, alpha, d_gamma, m_Hsize);
     }
 
     // Update gamma using the Sinkhorn iterate
