@@ -60,6 +60,9 @@ public:
     SparseCholeskySolver();
     ~SparseCholeskySolver();
 
+    // Get CUDA stream
+    cudaStream_t get_cuda_stream() { return m_stream; }
+
     // Matrix creation
     void set_A(
         double* d_values, int* d_colind, int* d_rowptr,
