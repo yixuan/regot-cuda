@@ -216,8 +216,8 @@ void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStream
 // In: alpha          [n]
 // In: beta           [m]
 // In: M              [n*m]
-// Out: Trowsums      [n]
-// Out: Tcolsums      [m]
+// Out: Trowsums      [n], assuming initialized to zero
+// Out: Tcolsums      [m], assuming initialized to zero
 // Out: Tsum          [1]
 // Out: Tvalues       [n*(m-1)]
 // Out: Tflatind      [n*(m-1)]
@@ -275,6 +275,11 @@ __global__ void T_fused_kernel(
     if (tx == 0 && ty == 0)
     {
         s_block_sum = 0.0;
+    }
+    // Initialize Tsum to be zero
+    if (start_i == 0 && j == 0)
+    {
+        *Tsum = 0.0;
     }
     __syncthreads();
 
@@ -407,6 +412,13 @@ __global__ void obj_grad_kernel(
     int stride = blockDim.x * gridDim.x;
     int total_len = n + m;
 
+    // Initialize objfn to be zero
+    if (idx == 0)
+    {
+        *objfn = 0.0;
+    }
+    __syncthreads();
+
     // Local variable to accumulate the dot product <gamma, ab> = <alpha, a> + <beta, b>
     double local_dotprod = 0.0;
 
@@ -527,8 +539,8 @@ void launch_T_computation(
     // Zero out the reduction arrays
     CUDA_CHECK(cudaMemsetAsync(d_Trowsums, 0, n * sizeof(double), stream));
     CUDA_CHECK(cudaMemsetAsync(d_Tcolsums, 0, m * sizeof(double), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_Tsum, 0, sizeof(double), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_objfn, 0, sizeof(double), stream));
+    // CUDA_CHECK(cudaMemsetAsync(d_Tsum, 0, sizeof(double), stream));
+    // CUDA_CHECK(cudaMemsetAsync(d_objfn, 0, sizeof(double), stream));
 
     // Compute dimensions
     dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
