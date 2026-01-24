@@ -1,5 +1,7 @@
 #include <iostream>
 #include <cmath>
+#include <thread>
+#include <atomic>
 
 // CUDA headers
 #include <cuda_runtime.h>
@@ -103,7 +105,10 @@ private:
     // Dual variables on device
     double*       d_gamma;
     double*       d_gamma_prev;
-    // Sinkhorn BCD iterate
+    // Sinkhorn BCD iterates
+    cudaStream_t  m_sinkhorn_stream;
+    std::thread   m_sinkhorn_thread;
+    std::atomic<bool> m_sinkhorn_stop_flag;
     double*       d_gamma_bcd;
     double*       d_objfn_bcd;
     double*       d_grad_bcd;
@@ -212,6 +217,9 @@ public:
 
         // Set d_grad_prev to zero
         CUDA_CHECK(cudaMemsetAsync(d_grad_prev, 0, m_Hsize * sizeof(double), cudaStreamPerThread));
+
+        // Create CUDA stream for Sinkhorn iterations
+        CUDA_CHECK(cudaStreamCreate(&m_sinkhorn_stream));
     }
 
     // Destructor
@@ -246,6 +254,9 @@ public:
         CUDA_CHECK(cudaFree(d_Hrowptr));
         CUDA_CHECK(cudaFree(d_work));
         CUDA_CHECK(cudaFree(d_iwork));
+
+        // Destroy CUDA stream for Sinkhorn iterations
+        CUDA_CHECK(cudaStreamDestroy(m_sinkhorn_stream));
     }
 
     // Sinkhorn iteration to update alpha
@@ -366,26 +377,29 @@ public:
 
     // Compute Sinkhorn iterate
     // This will be parallel to compute_search_direc()
-    void compute_sinkhorn_iterate(int niter = 3)
+private:
+    // Some helper functions
+    //
+    // Sinkhorn loops that listen to the stopping flag
+    void sinkhorn_loop()
     {
-        nvtx3::scoped_range r{"compute_sinkhorn_iterate"};
-
         const double* d_loga = d_logab;
         const double* d_logb = d_logab + m_n;
         double* d_alpha_bcd = d_gamma_bcd;
         double* d_beta_bcd = d_gamma_bcd + m_n;
 
-        // Read beta from d_gamma and write BCD-computed alpha to d_gamma_bcd
-        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha_bcd, m_reg, m_n, m_m, cudaStreamPerThread);
-        // Sinkhorn iterations
-        for (int i = 0; i < niter; i++)
+        while (!m_sinkhorn_stop_flag.load())
         {
-            compute_optimal_beta(d_M, d_alpha_bcd, d_logb, d_beta_bcd, m_reg, m_n, m_m, cudaStreamPerThread);
-            compute_optimal_alpha(d_M, d_beta_bcd, d_loga, d_alpha_bcd, m_reg, m_n, m_m, cudaStreamPerThread);
+            compute_optimal_beta(d_M, d_alpha_bcd, d_logb, d_beta_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+            compute_optimal_alpha(d_M, d_beta_bcd, d_loga, d_alpha_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+            cudaStreamSynchronize(m_sinkhorn_stream);
         }
-
+    }
+    // Compute objective function value and gradient on the Sinkhorn iterate
+    void post_sinkhorn_iterate()
+    {
         // Shift d_gamma_bcd such that the last element is zero
-        shift_gamma(d_gamma_bcd, m_n, m_m, cudaStreamPerThread);
+        shift_gamma(d_gamma_bcd, m_n, m_m, m_sinkhorn_stream);
 
         // Compute the objective function value and gradient of the Sinkhorn iterate
         launch_objfn_grad_sphess(
@@ -396,8 +410,45 @@ public:
             d_work, d_iwork,
             true, false,  // stage1, stage2
             true,         // fixed_indices = true makes stage1 not writing to d_Tvalues and d_Tflatind
-            cudaStreamPerThread
+            m_sinkhorn_stream
         );
+    }
+public:
+    // Main function
+    // niter > 0  =>  run a fixed number of Sinkhorn iterations
+    // niter < 0  =>  automatically fill GPU idle time
+    // niter = 0  =>  no Sinkhorn iterations
+    void compute_sinkhorn_iterate(int niter = 3)
+    {
+        nvtx3::scoped_range r{"compute_sinkhorn_iterate"};
+
+        const double* d_loga = d_logab;
+        const double* d_logb = d_logab + m_n;
+        double* d_alpha_bcd = d_gamma_bcd;
+        double* d_beta_bcd = d_gamma_bcd + m_n;
+
+        // Read beta from d_gamma and write BCD-computed alpha to d_gamma_bcd
+        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+
+        // If niter < 0, we create a new thread to launch CUDA kernels, and the thread will finish
+        // after m_sinkhorn_stop_flag is set to true in compute_search_direc()
+        if (niter < 0)
+        {
+            // Launch Sinkhorn iteration loop
+            m_sinkhorn_stop_flag.store(false);
+            m_sinkhorn_thread = std::thread(&SPLRSolver::sinkhorn_loop, this);
+            return;
+        }
+
+        // Sinkhorn iterations
+        for (int i = 0; i < niter; i++)
+        {
+            compute_optimal_beta(d_M, d_alpha_bcd, d_logb, d_beta_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+            compute_optimal_alpha(d_M, d_beta_bcd, d_loga, d_alpha_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+        }
+
+        // Compute objective function value and gradient on the Sinkhorn iterate
+        post_sinkhorn_iterate();
     }
 
     // Get objective function value and gradient norm of the Sinkhorn iterate
@@ -457,19 +508,23 @@ public:
 
         if (analyze_pattern)
         {
-            // For timing, we separate analyze() as reorder() + symfac()
-            // Otherwise we run the combined analyze()
-            if (verbose >= 3)
+            // Reordering stage mainly runs on CPU
+            m_linsolver.reorder();
+            timer.toc("reorder");
+
+            // After the reordering part, we can stop Sinkhorn iterations
+            // This only works for the case of candidate_sinkhorn_iter < 0,
+            // since otherwise the thread is not joinable
+            m_sinkhorn_stop_flag.store(true);
+            if (m_sinkhorn_thread.joinable())
             {
-                m_linsolver.reorder();
-                timer.toc("reorder");
-                m_linsolver.symfac();
-                timer.toc("symfac");
+                m_sinkhorn_thread.join();
+                // Compute objective function value and gradient on the Sinkhorn iterate
+                post_sinkhorn_iterate();
             }
-            else
-            {
-                m_linsolver.analyze();
-            }
+
+            m_linsolver.symfac();
+            timer.toc("symfac");
         }
         m_linsolver.factorize();
         timer.toc("factorize");
@@ -875,7 +930,7 @@ void cuda_sinkhorn_splr(
         // The Sinkhorn iterate is a candidate for the next move. For example, we can
         // compare the objective function value and gradient of both the Sinkhorn iterate
         // and the quasi-Newton iterate, and then decide which one is the next move
-        if (analyze_pattern && candidate_sinkhorn_iter > 0)
+        if (analyze_pattern && (candidate_sinkhorn_iter != 0))
         {
             // This part will run roughly at the same time as the analysis stage of
             // the sparse Cholesky decomposition
@@ -922,7 +977,7 @@ void cuda_sinkhorn_splr(
         // If analyze_pattern is true, it means that we have also computed the Sinkhorn iterate
         // If it is better than the quasi-Newton direction (both objfn and gnorm are smaller),
         // then we overwrite gamma with the Sinkhorn iterate
-        if (analyze_pattern && candidate_sinkhorn_iter > 0)
+        if (analyze_pattern && (candidate_sinkhorn_iter != 0))
         {
             double objfn_bcd, gnorm_bcd;
             solver.objfn_gnorm_bcd(objfn_bcd, gnorm_bcd);
