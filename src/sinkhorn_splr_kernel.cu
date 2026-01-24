@@ -257,14 +257,13 @@ __global__ void T_fused_kernel(
     __shared__ double s_block_sum;
 
     // Indices
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-    int lane_id = tx % warpSize;
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
     // Global column index
-    int j = blockIdx.x * blockDim.x + tx;
+    const int j = blockIdx.x * blockDim.x + tx;
     // Grid-stride loop on i
-    int start_i = blockIdx.y * blockDim.y + ty;
-    int stride_i = gridDim.y * blockDim.y;
+    const int start_i = blockIdx.y * blockDim.y + ty;
+    const int stride_i = gridDim.y * blockDim.y;
 
     // Initialize shared memory
     // Only one thread per column needs to do this
@@ -281,6 +280,16 @@ __global__ void T_fused_kernel(
 
     // This variable collects T_ij values on different strides
     double Tij_stride_sum = 0.0;
+    // This variable collects warp row sums on different strides
+    // (only meaningful for land_id == 0)
+    double warp_row_stride_sum = 0.0;
+    // Quantities that do not vary with i
+    const bool j_lt_m = (j < m);
+    const bool write_val_ind = write_values_and_indices && (j < m - 1);
+    // const int lane_id = tx % warpSize;
+    const bool is_lane0 = (tx % warpSize == 0);
+    const int flat_idx_Hsl_head = (n + j) * (n + m - 1);
+    const double betaj = beta[j];
     // Grid-stride loop on i, with boundary check on j
     for (int i = start_i; i < n; i += stride_i)
     {
@@ -288,23 +297,28 @@ __global__ void T_fused_kernel(
         // join reduction but do not affect the result
         double T_ij = 0.0;
 
-        if (j < m)
+        // if (j < m)
+        if (j_lt_m)
         {
             // Flattened index reading M[i, j]
-            int flat_idx_M = i * m + j;
-            // We read T_t by row, and write to Tvalues [n*(m-1)]
-            // T_t[i, j] -> Tvalues[i * (m-1) + j]
-            int flat_idx_Tvalues = flat_idx_M - i;  // == i * (m - 1) + j;
-            // Index of T_t[i, j] in flattened Hsl matrix
-            int flat_idx_Hsl = (n + j) * (n + m - 1) + i;
+            const int flat_idx_M = i * m + j;
 
             // 1. Compute T[i, j]
-            T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
+            // T_ij = exp((alpha[i] + beta[j] - M[flat_idx_M]) / reg);
+            T_ij = exp((alpha[i] + betaj - M[flat_idx_M]) / reg);
 
             // 2. Fill Tflatind and Tvalues only when j < m-1,
             //    excluding the last row of T' (last column of T)
-            if (write_values_and_indices && j < m - 1)
+            // if (write_values_and_indices && j < m - 1)
+            if (write_val_ind)
             {
+                // We read T_t by row, and write to Tvalues [n*(m-1)]
+                // T_t[i, j] -> Tvalues[i * (m-1) + j]
+                const int flat_idx_Tvalues = flat_idx_M - i;  // == i * (m - 1) + j;
+                // Index of T_t[i, j] in flattened Hsl matrix
+                // const int flat_idx_Hsl = (n + j) * (n + m - 1) + i;
+                const int flat_idx_Hsl = flat_idx_Hsl_head + i;
+
                 Tflatind[flat_idx_Tvalues] = flat_idx_Hsl;
                 Tvalues[flat_idx_Tvalues] = T_ij;
             }
@@ -321,8 +335,9 @@ __global__ void T_fused_kernel(
         // to the global memory
         // Note that we allow multiple warps in each row of the block,
         // since BLOCK_DIM_X can be a multiple of warpSize
-        if (lane_id == 0)
+        if (is_lane0)
         {
+            warp_row_stride_sum += warp_row_sum;
             atomicAdd(&Trowsums[i], warp_row_sum);
         }
     }
@@ -338,15 +353,15 @@ __global__ void T_fused_kernel(
     // 6. Write column sums within the block to the global memory
     // The first row of threads (ty=0) in each block does this
     // Different blocks on the y direction will visit the same Tcolsums[j]
-    if (ty == 0 && j < m)
+    if (ty == 0 && j_lt_m)
     {
         atomicAdd(&Tcolsums[j], s_col_sum[tx]);
     }
 
     // 7. Compute block total sum
     //    First compute warp sums, and then aggregate warp sums to block sum
-    double warp_row_stride_sum = warp_reduce_sum(Tij_stride_sum);
-    if (lane_id == 0)
+    // const double warp_row_stride_sum = warp_reduce_sum(Tij_stride_sum);
+    if (is_lane0)
     {
         atomicAdd(&s_block_sum, warp_row_stride_sum);
     }
