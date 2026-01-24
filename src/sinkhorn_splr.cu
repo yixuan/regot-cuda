@@ -115,6 +115,8 @@ private:
     double*       d_grad;
     double*       d_grad_prev;
     // Search direction and low-rank vectors
+    double*       d_linsolve_rhs;  // [grad, y]
+    double*       d_linsolve_sol;  // [direc, invA_y]
     double*       d_direc;
     double*       d_y;
     double*       d_s;
@@ -168,12 +170,22 @@ public:
         CUDA_CHECK(cudaMalloc(&d_objfn_bcd, sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_grad_bcd, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_grad, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_grad_prev, m_Hsize * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_direc, m_Hsize * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_y, m_Hsize * sizeof(double)));
+        // In computing the search direction, we need to solve
+        // A * direc = grad or A * [direc, invA_y] = [grad, y],
+        // depending on whether the low-rank term is used
+        // Therefore, we should make the memory blocks [direc, invA_y] and [grad, y] contiguous
+        CUDA_CHECK(cudaMalloc(&d_linsolve_rhs, 2 * m_Hsize * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_linsolve_sol, 2 * m_Hsize * sizeof(double)));
+        // CUDA_CHECK(cudaMalloc(&d_grad, m_Hsize * sizeof(double)));
+        // CUDA_CHECK(cudaMalloc(&d_direc, m_Hsize * sizeof(double)));
+        // CUDA_CHECK(cudaMalloc(&d_y, m_Hsize * sizeof(double)));
+        // CUDA_CHECK(cudaMalloc(&d_invA_y, m_Hsize * sizeof(double)));
+        d_grad = d_linsolve_rhs;
+        d_direc = d_linsolve_sol;
+        d_y = d_linsolve_rhs + m_Hsize;
+        d_invA_y = d_linsolve_sol + m_Hsize;
         CUDA_CHECK(cudaMalloc(&d_s, m_Hsize * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_invA_y, m_Hsize * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_Hvalues, (Kmax + m_Hsize) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_Hflatind, (Kmax + m_Hsize) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_Hcolind, (Kmax + m_Hsize) * sizeof(int)));
@@ -220,12 +232,14 @@ public:
         CUDA_CHECK(cudaFree(d_objfn_bcd));
         CUDA_CHECK(cudaFree(d_grad_bcd));
         CUDA_CHECK(cudaFree(d_objfn));
-        CUDA_CHECK(cudaFree(d_grad));
         CUDA_CHECK(cudaFree(d_grad_prev));
-        CUDA_CHECK(cudaFree(d_direc));
-        CUDA_CHECK(cudaFree(d_y));
+        CUDA_CHECK(cudaFree(d_linsolve_rhs));
+        CUDA_CHECK(cudaFree(d_linsolve_sol));
+        // CUDA_CHECK(cudaFree(d_grad));
+        // CUDA_CHECK(cudaFree(d_direc));
+        // CUDA_CHECK(cudaFree(d_y));
+        // CUDA_CHECK(cudaFree(d_invA_y));
         CUDA_CHECK(cudaFree(d_s));
-        CUDA_CHECK(cudaFree(d_invA_y));
         CUDA_CHECK(cudaFree(d_Hvalues));
         CUDA_CHECK(cudaFree(d_Hflatind));
         CUDA_CHECK(cudaFree(d_Hcolind));
@@ -431,9 +445,15 @@ public:
         Timer timer(verbose >= 3);
         timer.tic();
         cudaStream_t stream = m_linsolver.get_cuda_stream();
+        // If low_rank = true, then we need to solve two vectors,
+        //     A * [direc, invA_y] = [grad, y]
+        // Otherwise we only solve A * direc = grad
+        // Since the memory layout is d_linsolve_rhs = [d_grad, d_y] and
+        // d_linsolve_sol = [d_direc, d_invA_y], we just need to specify
+        // how many rhs to solve
         m_linsolver.set_A(d_Hvalues, d_Hcolind, d_Hrowptr, m_Hsize, nnz);
-        m_linsolver.set_b(d_grad, m_Hsize);
-        m_linsolver.set_x(d_direc, m_Hsize);
+        m_linsolver.set_b(d_linsolve_rhs, m_Hsize, low_rank ? 2 : 1);
+        m_linsolver.set_x(d_linsolve_sol, m_Hsize, low_rank ? 2 : 1);
 
         if (analyze_pattern)
         {
@@ -456,12 +476,12 @@ public:
         m_linsolver.solve();
         timer.toc("solve");
 
+        // After calling solve(), d_direc will contain the desired value
+        // If low_rank = true, d_invA_y will also be available
+
         if (low_rank)
         {
             // invA_y = inv(A) * y;
-            m_linsolver.set_b(d_y, m_Hsize);
-            m_linsolver.set_x(d_invA_y, m_Hsize);
-            m_linsolver.solve();
 
             // BFGS rule
             // sg = s'g, ys = y's

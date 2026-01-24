@@ -52,9 +52,9 @@ private:
     cudssHandle_t m_handle;
     cudssConfig_t m_config;
     cudssData_t   m_data;
-    cudssMatrix_t m_mat_A;
-    cudssMatrix_t m_vec_b;
-    cudssMatrix_t m_vec_x;
+    cudssMatrix_t m_A;
+    cudssMatrix_t m_b;
+    cudssMatrix_t m_x;
 
 public:
     SparseCholeskySolver();
@@ -68,8 +68,8 @@ public:
         double* d_values, int* d_colind, int* d_rowptr,
         int n, size_t nnz
     );
-    void set_b(double* d_rhs, int n);
-    void set_x(double* d_sol, int n);
+    void set_b(double* d_rhs, int n, int nrhs = 1);
+    void set_x(double* d_sol, int n, int nrhs = 1);
 
     // reorder() and symfac() are mainly for debugging purposes
     // analyze() is basically a combination of reorder() and symfac()

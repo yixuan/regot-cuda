@@ -45,9 +45,9 @@ SparseCholeskySolver::~SparseCholeskySolver()
 {
     // Cleanup
     CUDA_CHECK(cudaStreamDestroy(m_stream));
-    CUDSS_CHECK(cudssMatrixDestroy(m_mat_A));
-    CUDSS_CHECK(cudssMatrixDestroy(m_vec_x));
-    CUDSS_CHECK(cudssMatrixDestroy(m_vec_b));
+    CUDSS_CHECK(cudssMatrixDestroy(m_A));
+    CUDSS_CHECK(cudssMatrixDestroy(m_x));
+    CUDSS_CHECK(cudssMatrixDestroy(m_b));
     CUDSS_CHECK(cudssDataDestroy(m_handle, m_data));
     CUDSS_CHECK(cudssConfigDestroy(m_config));
     CUDSS_CHECK(cudssDestroy(m_handle));
@@ -60,26 +60,26 @@ void SparseCholeskySolver::set_A(
 {
     // CUDSS_MTYPE_SPD for Cholesky decomposition
     CUDSS_CHECK(cudssMatrixCreateCsr(
-        &m_mat_A, n, n, nnz,
+        &m_A, n, n, nnz,
         d_rowptr, nullptr, d_colind, d_values,
         CUDA_R_32I, CUDA_R_64F,
         CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, CUDSS_BASE_ZERO
     ));
 }
 
-void SparseCholeskySolver::set_b(double* d_rhs, int n)
+void SparseCholeskySolver::set_b(double* d_rhs, int n, int nrhs)
 {
     CUDSS_CHECK(cudssMatrixCreateDn(
-        &m_vec_b, n, 1, n,
+        &m_b, n, nrhs, n,
         d_rhs,
         CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
     ));
 }
 
-void SparseCholeskySolver::set_x(double* d_sol, int n)
+void SparseCholeskySolver::set_x(double* d_sol, int n, int nrhs)
 {
     CUDSS_CHECK(cudssMatrixCreateDn(
-        &m_vec_x, n, 1, n,
+        &m_x, n, nrhs, n,
         d_sol,
         CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR
     ));
@@ -89,7 +89,7 @@ void SparseCholeskySolver::reorder()
 {
     CUDSS_CHECK(cudssExecute(
         m_handle, CUDSS_PHASE_REORDERING, m_config, m_data,
-        m_mat_A, m_vec_x, m_vec_b
+        m_A, m_x, m_b
     ));
 }
 
@@ -97,7 +97,7 @@ void SparseCholeskySolver::symfac()
 {
     CUDSS_CHECK(cudssExecute(
         m_handle, CUDSS_PHASE_SYMBOLIC_FACTORIZATION, m_config, m_data,
-        m_mat_A, m_vec_x, m_vec_b
+        m_A, m_x, m_b
     ));
 }
 
@@ -105,7 +105,7 @@ void SparseCholeskySolver::analyze()
 {
     CUDSS_CHECK(cudssExecute(
         m_handle, CUDSS_PHASE_ANALYSIS, m_config, m_data,
-        m_mat_A, m_vec_x, m_vec_b
+        m_A, m_x, m_b
     ));
 }
 
@@ -113,7 +113,7 @@ void SparseCholeskySolver::factorize()
 {
     CUDSS_CHECK(cudssExecute(
         m_handle, CUDSS_PHASE_FACTORIZATION, m_config, m_data,
-        m_mat_A, m_vec_x, m_vec_b
+        m_A, m_x, m_b
     ));
 }
 
@@ -121,7 +121,7 @@ void SparseCholeskySolver::solve()
 {
     CUDSS_CHECK(cudssExecute(
         m_handle, CUDSS_PHASE_SOLVE, m_config, m_data,
-        m_mat_A, m_vec_x, m_vec_b
+        m_A, m_x, m_b
     ));
 }
 
@@ -152,8 +152,8 @@ void sparse_cholesky_solve(
 
     // Matrix creation
     solver.set_A(d_values, d_colind, d_rowptr, n, nnz);
-    solver.set_b(d_rhs, n);
-    solver.set_x(d_x, n);
+    solver.set_b(d_rhs, n, 1);
+    solver.set_x(d_x, n, 1);
 
     // Step 1: Symbolic analysis
     solver.analyze();
