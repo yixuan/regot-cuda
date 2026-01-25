@@ -21,6 +21,12 @@ void compute_axpy_cuda(const double* d_x, const double* d_y, double a, double* d
 // x'y
 double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size, cudaStream_t stream = cudaStreamPerThread);
 
+// Overloaded versions using pinned host memory
+double compute_l2_norm_cuda(const double* d_vec, double* h_pinned, int size, cudaStream_t stream = cudaStreamPerThread);
+double compute_dot_prod_cuda(const double* d_x, const double* d_y, double* h_pinned, int size, cudaStream_t stream = cudaStreamPerThread);
+
+
+
 // Use heuristics to set the total number of blocks
 inline int heuristic_num_blocks()
 {

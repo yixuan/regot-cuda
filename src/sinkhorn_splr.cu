@@ -134,6 +134,7 @@ private:
     // Working space
     double*       d_work;
     int*          d_iwork;
+    double*       h_pinned;
     // Sparse Cholesky solver
     SparseCholeskySolver m_linsolver;
 
@@ -198,6 +199,9 @@ public:
         CUDA_CHECK(cudaMalloc(&d_work, (m_n + m_m + 1 + m_Te) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_iwork, std::max(m_Te, m_Hsize) * sizeof(int)));
 
+        // Pinned memory
+        CUDA_CHECK(cudaHostAlloc(&h_pinned, 1024 * sizeof(double), cudaHostAllocMapped));
+
         // Pointer aliases
         d_alpha = d_gamma;
         d_beta = d_gamma + m_n;
@@ -254,6 +258,9 @@ public:
         CUDA_CHECK(cudaFree(d_Hrowptr));
         CUDA_CHECK(cudaFree(d_work));
         CUDA_CHECK(cudaFree(d_iwork));
+
+        // Free pinned memory
+        CUDA_CHECK(cudaFreeHost(h_pinned));
 
         // Destroy CUDA stream for Sinkhorn iterations
         CUDA_CHECK(cudaStreamDestroy(m_sinkhorn_stream));
@@ -360,7 +367,7 @@ public:
     {
         nvtx3::scoped_range r{"grad_norm"};
 
-        return compute_l2_norm_cuda(d_grad, m_Hsize, cudaStreamPerThread);
+        return compute_l2_norm_cuda(d_grad, h_pinned, m_Hsize, cudaStreamPerThread);
     }
 
     // Compute low-rank vectors
@@ -456,7 +463,7 @@ public:
     {
         nvtx3::scoped_range r{"objfn_gnorm_bcd"};
 
-        gnorm = compute_l2_norm_cuda(d_grad_bcd, m_Hsize, cudaStreamPerThread);
+        gnorm = compute_l2_norm_cuda(d_grad_bcd, h_pinned, m_Hsize, cudaStreamPerThread);
         CUDA_CHECK(cudaMemcpy(&objfn, d_objfn_bcd, sizeof(double), cudaMemcpyDeviceToHost));
     }
 
@@ -593,7 +600,7 @@ public:
 
         // Initial step size
         double step = init_step, step_max = 2.0;
-        double fx = cur_obj, dg = compute_dot_prod_cuda(d_grad_prev, d_direc, m_Hsize, cudaStreamPerThread);
+        double fx = cur_obj, dg = compute_dot_prod_cuda(d_grad_prev, d_direc, h_pinned, m_Hsize, cudaStreamPerThread);
 
         // Save the function value at the current x
         const double fx_init = cur_obj;
@@ -625,7 +632,7 @@ public:
         // In this case shift and K are not used
         dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
         // Get g'(direc)
-        dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize, cudaStreamPerThread);
+        dg = compute_dot_prod_cuda(d_grad, d_direc, h_pinned, m_Hsize, cudaStreamPerThread);
         new_obj = fx;
 
         // Convergence test
@@ -715,7 +722,7 @@ public:
             // Update parameter, function value, and gradient
             compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize, cudaStreamPerThread);
             dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
-            dg = compute_dot_prod_cuda(d_grad, d_direc, m_Hsize, cudaStreamPerThread);
+            dg = compute_dot_prod_cuda(d_grad, d_direc, h_pinned, m_Hsize, cudaStreamPerThread);
             new_obj = fx;
 
             // Convergence test

@@ -189,6 +189,72 @@ double compute_l2_norm_cuda(const double* d_vec, int size, cudaStream_t stream)
     return std::sqrt(result);
 }
 
+// CUDA kernel for computing the squared l2 norm of a vector
+// Only stores blockwise result
+__global__ void compute_block_squared_l2_norm_kernel(
+    const double* __restrict__ vec,
+    double* __restrict__ block_result,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = bid * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    double sum_of_squares = 0.0;
+
+    // Grid-stride loop
+    // Similar to "if (idx < size)" but handles arbitrary vector size
+    for (int i = idx; i < size; i += stride)
+    {
+        double val = vec[i];
+        sum_of_squares += val * val;
+    }
+
+    // Intra-block reduce
+    // Sums up results within this block
+    // Stored in the first thread of the block
+    sum_of_squares = block_reduce_sum(sum_of_squares);
+
+    // The first thread of the block adds the block's sum to the global memory
+    if (tid == 0)
+    {
+        block_result[bid] = sum_of_squares;
+    }
+}
+
+// Helper function to compute the l2 norm of a vector on device,
+// using pinned memory containing at least 256 elements
+double compute_l2_norm_cuda(const double* d_vec, double* h_pinned, int size, cudaStream_t stream)
+{
+    // Get device pointer to the pinned memory
+    double* d_block_result;
+    cudaHostGetDevicePointer(&d_block_result, h_pinned, 0);
+
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in compute_squared_l2_norm_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+
+    compute_block_squared_l2_norm_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
+        d_vec, d_block_result, size
+    );
+    cudaStreamSynchronize(stream);
+
+    // Compute final result on CPU
+    double result = 0.0;
+    for (int i = 0; i < numBlocks; i++)
+    {
+        result += h_pinned[i];
+    }
+
+    return std::sqrt(result);
+}
+
 // CUDA kernel to compute elementwise logarithm using grid-stride loop
 __global__ void compute_log_vector_kernel(
     const double* __restrict__ x,
@@ -356,6 +422,72 @@ double compute_dot_prod_cuda(const double* d_x, const double* d_y, int size, cud
     double result;
     CUDA_CHECK(cudaMemcpy(&result, d_result, sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(d_result));
+
+    return result;
+}
+
+// CUDA kernel for computing inner product x'y
+// Only stores blockwise result
+__global__ void compute_block_dot_prod_kernel(
+    const double* __restrict__ x,
+    const double* __restrict__ y,
+    double* __restrict__ block_result,
+    int size
+)
+{
+    // Indices
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = bid * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    double dot_prod = 0.0;
+
+    // Grid-stride loop
+    // Similar to "if (idx < size)" but handles arbitrary vector size
+    for (int i = idx; i < size; i += stride)
+    {
+        dot_prod += x[i] * y[i];
+    }
+
+    // Intra-block reduce
+    // Sums up results within this block
+    // Stored in the first thread of the block
+    dot_prod = block_reduce_sum(dot_prod);
+
+    // The first thread of the block adds the block's sum to the global memory
+    if (tid == 0)
+    {
+        block_result[bid] = dot_prod;
+    }
+}
+
+// Helper function to compute inner product x'y on device
+// using pinned memory containing at least 256 elements
+double compute_dot_prod_cuda(const double* d_x, const double* d_y, double* h_pinned, int size, cudaStream_t stream)
+{
+    // Get device pointer to the pinned memory
+    double* d_block_result;
+    cudaHostGetDevicePointer(&d_block_result, h_pinned, 0);
+
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (size + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to 256
+    // The grid-stride loop in compute_dot_prod_kernel()
+    // will handle larger sizes
+    numBlocks = std::min(numBlocks, 256);
+
+    compute_block_dot_prod_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
+        d_x, d_y, d_block_result, size
+    );
+    cudaStreamSynchronize(stream);
+
+    // Compute final result on CPU
+    double result = 0.0;
+    for (int i = 0; i < numBlocks; i++)
+    {
+        result += h_pinned[i];
+    }
 
     return result;
 }
