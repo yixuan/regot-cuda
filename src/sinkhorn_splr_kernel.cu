@@ -161,7 +161,7 @@ __device__ __forceinline__ double block_reduce_sum(double val)
 
 // CUDA kernel to transform the gamma=(alpha, beta) vector to gamma'=(alpha', beta_t', 0)
 // alpha += beta[m-1], beta -= beta[m-1]
-// The last zero will be set by the first thread
+// The last zero will be set in the helper function that calls this kernel
 __global__ void shift_gamma_kernel(double* d_gamma, int n, int m)
 {
     // Get shift
@@ -174,13 +174,6 @@ __global__ void shift_gamma_kernel(double* d_gamma, int n, int m)
     for (int i = i_start; i < shift_index; i += stride)
     {
         d_gamma[i] += ((i < n) ? shift : -shift);
-    }
-    __syncthreads();
-
-    // Set beta[m-1] to zero
-    if (i_start == 0)
-    {
-        d_gamma[shift_index] = 0.0;
     }
 }
 
@@ -207,6 +200,9 @@ void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStream
             d_gamma, n, m
         );
     }
+
+    // Set gamma[n+m-1]=0
+    cudaMemsetAsync(d_gamma + (n + m - 1), 0, sizeof(double), stream);
 }
 
 // Fused CUDA kernel for computation on T
