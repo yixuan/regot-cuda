@@ -83,8 +83,8 @@ __device__ __forceinline__ double block_reduce_sum(double val)
 // In: gamma_prev  [Hsize]
 // Out: y          [Hsize]
 // Out: s          [Hsize]
-// Out: ys         [1]
-// Out: yy         [1]
+// Out: block_ys   [MAX_NUM_BLOCK_1D]
+// Out: block_yy   [MAX_NUM_BLOCK_1D]
 __global__ void low_rank_fused_kernel(
     const double* __restrict__ grad,
     const double* __restrict__ grad_prev,
@@ -92,15 +92,16 @@ __global__ void low_rank_fused_kernel(
     const double* __restrict__ gamma_prev,
     double* __restrict__ y,
     double* __restrict__ s,
-    double* __restrict__ ys,
-    double* __restrict__ yy,
+    double* __restrict__ block_ys,
+    double* __restrict__ block_yy,
     int size
 )
 {
     // Indices
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    const int idx = bid * blockDim.x + tid;
+    const int stride = blockDim.x * gridDim.x;
 
     // Local accumulators
     double local_ys = 0.0;
@@ -110,14 +111,14 @@ __global__ void low_rank_fused_kernel(
     for (int i = idx; i < size; i += stride)
     {
         // Load
-        double g = grad[i];
-        double gp = grad_prev[i];
-        double gam = gamma[i];
-        double gamp = gamma_prev[i];
+        const double g = grad[i];
+        const double gp = grad_prev[i];
+        const double gam = gamma[i];
+        const double gamp = gamma_prev[i];
 
         // Compute
-        double yval = g - gp;
-        double sval = gam - gamp;
+        const double yval = g - gp;
+        const double sval = gam - gamp;
 
         // Store
         y[i] = yval;
@@ -138,8 +139,8 @@ __global__ void low_rank_fused_kernel(
     // Only one thread needs to do this once
     if (tid == 0)
     {
-        atomicAdd(ys, local_ys);
-        atomicAdd(yy, local_yy);
+        block_ys[bid] = local_ys;
+        block_yy[bid] = local_yy;
     } 
 }
 
@@ -153,6 +154,7 @@ __global__ void low_rank_fused_kernel(
 // Out: d_s          [Hsize]
 // Out: ys (host)    [1]
 // Out: yy (host)    [1]
+// Work: h_pinned    [2*MAX_NUM_BLOCK_1D]
 void launch_low_rank(
     const double* d_grad,
     const double* d_grad_prev,
@@ -163,18 +165,18 @@ void launch_low_rank(
     double& ys,
     double& yy,
     int size,
+    double* h_pinned,
     cudaStream_t stream = cudaStreamPerThread
 )
 {
-    // Allocate device memory for scalars
-    double* d_ys;
-    double* d_yy;
-    CUDA_CHECK(cudaMalloc(&d_ys, sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_yy, sizeof(double)));
+    // Get device pointer to the pinned memory
+    double* d_block_result;
+    cudaHostGetDevicePointer(&d_block_result, h_pinned, 0);
 
-    // Initialize to zero
-    CUDA_CHECK(cudaMemsetAsync(d_ys, 0, sizeof(double), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_yy, 0, sizeof(double), stream));
+    const double* h_ys = h_pinned;
+    const double* h_yy = h_pinned + MAX_NUM_BLOCK_1D;
+    double* d_block_ys = d_block_result;
+    double* d_block_yy = d_block_result + MAX_NUM_BLOCK_1D;
 
     // Call kernel function
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -182,17 +184,21 @@ void launch_low_rank(
     // Limit number of blocks to 256
     // The grid-stride loop in low_rank_fused_kernel() will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
+
     low_rank_fused_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
-        d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, d_ys, d_yy, size
+        d_grad, d_grad_prev, d_gamma, d_gamma_prev,
+        d_y, d_s,
+        d_block_ys, d_block_yy, size
     );
+    cudaStreamSynchronize(stream);
 
-    // Copy results to host
-    CUDA_CHECK(cudaMemcpy(&ys, d_ys, sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&yy, d_yy, sizeof(double), cudaMemcpyDeviceToHost));
-
-    // Free device memory
-    CUDA_CHECK(cudaFree(d_ys));
-    CUDA_CHECK(cudaFree(d_yy));
+    // Compute final result on CPU
+    ys = yy = 0.0;
+    for (int i = 0; i < numBlocks; i++)
+    {
+        ys += h_ys[i];
+        yy += h_yy[i];
+    }
 }
 
 // CUDA kernels to compute search direction with low-rank terms
@@ -202,14 +208,17 @@ __global__ void search_direc_dot_kernel(
     const double* __restrict__ y,
     const double* __restrict__ invA_y,
     const double* __restrict__ invA_g,
-    double* __restrict__ d_scalars,  // sg, yinvAy, yinvAg
+    double* __restrict__ block_sg,
+    double* __restrict__ block_yinvAy,
+    double* __restrict__ block_yinvAg,
     int size
 )
 {
     // Indices
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    const int idx = bid * blockDim.x + tid;
+    const int stride = blockDim.x * gridDim.x;
 
     // Local accumulators
     double local_sg = 0.0;
@@ -219,7 +228,7 @@ __global__ void search_direc_dot_kernel(
     // Grid-stride loop
     for (int i = idx; i < size; i += stride)
     {
-        double yval = y[i];
+        const double yval = y[i];
         local_sg += s[i] * g[i];
         local_yinvAy += yval * invA_y[i];
         local_yinvAg += yval * invA_g[i];
@@ -234,57 +243,31 @@ __global__ void search_direc_dot_kernel(
     // Only one thread needs to do this once
     if (tid == 0)
     {
-        atomicAdd(&d_scalars[0], local_sg);
-        atomicAdd(&d_scalars[1], local_yinvAy);
-        atomicAdd(&d_scalars[2], local_yinvAg);
+        block_sg[bid] = local_sg;
+        block_yinvAy[bid] = local_yinvAy;
+        block_yinvAg[bid] = local_yinvAg;
     }
 }
 
+// CUDA kernels to compute direc += term1 * s - term2 * invA_y
 __global__ void update_direc_kernel(
-    double* __restrict__ direc,
-    const double* __restrict__ invA_y,
     const double* __restrict__ s,
-    const double* __restrict__ d_scalars,  // sg, yinvAy, yinvAg
-    double ys,
-    double reg,
+    const double* __restrict__ invA_y,
+    double term1, double term2,
+    double* __restrict__ direc,
     int size
 )
 {
     // Indices
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
-
-    // Only the first thread computes common values
-    // Use shared memory broadcast to avoid reading global memory by every thread
-    __shared__ double common_term1;
-    __shared__ double common_term2;
-
-    if (tid == 0)
-    {
-        double sg = d_scalars[0];
-        double yinvAy = d_scalars[1];
-        double yinvAg = d_scalars[2];
-        double sg_ys = sg / ys;
-
-        // direc += term1 * s - term2 * invA_y
-        // term1 = (1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys
-        // term2 = sg_ys
-        double term1 = (1.0 / reg + yinvAy / ys) * sg_ys - yinvAg / ys;
-        
-        common_term1 = term1;
-        common_term2 = sg_ys;
-    }
-    // Wait for computing common values
-    __syncthreads();
+    const int tid = threadIdx.x;
+    const int idx = blockIdx.x * blockDim.x + tid;
+    const int stride = blockDim.x * gridDim.x;
 
     // Grid-stride Loop
-    double t1 = common_term1;
-    double t2 = common_term2;
     // direc += t1 * s - t2 * invA_y
     for (int i = idx; i < size; i += stride)
     {
-        direc[i] += t1 * s[i] - t2 * invA_y[i];
+        direc[i] += (term1 * s[i] - term2 * invA_y[i]);
     }
 }
 
@@ -301,24 +284,30 @@ __global__ void update_direc_kernel(
 // In: d_g          [size]
 // In: d_y          [size]
 // In: d_s          [size]
+// Work: h_pinned   [3*MAX_NUM_BLOCK_1D]
 void launch_low_rank_search_direc(
     double* d_direc,
     const double* d_invA_y,
     const double* d_g,
     const double* d_y,
     const double* d_s,
-    const double ys,
-    const double reg,
+    double ys,
+    double reg,
     int size,
+    double* h_pinned,
     cudaStream_t stream = cudaStreamPerThread
 )
 {
-    // Allocate workspace
-    double* d_work;
-    CUDA_CHECK(cudaMalloc(&d_work, 3 * sizeof(double)));
+    // Get device pointer to the pinned memory
+    double* d_block_result;
+    cudaHostGetDevicePointer(&d_block_result, h_pinned, 0);
 
-    // Initialize to zero
-    CUDA_CHECK(cudaMemsetAsync(d_work, 0, 3 * sizeof(double), stream));
+    const double* h_sg = h_pinned;
+    const double* h_yinvAy = h_pinned + MAX_NUM_BLOCK_1D;
+    const double* h_yinvAg = h_pinned + 2 * MAX_NUM_BLOCK_1D;
+    double* d_block_sg = d_block_result;
+    double* d_block_yinvAy = d_block_result + MAX_NUM_BLOCK_1D;
+    double* d_block_yinvAg = d_block_result + 2 * MAX_NUM_BLOCK_1D;
 
     // Call first kernel function
     dim3 threadsPerBlock(BLOCK_DIM);
@@ -326,17 +315,32 @@ void launch_low_rank_search_direc(
     // Limit number of blocks to 256
     // The grid-stride loop in search_direc_dot_kernel() will handle larger sizes
     numBlocks = std::min(numBlocks, 256);
+
     search_direc_dot_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
-        d_s, d_g, d_y, d_invA_y, d_direc, 
-        d_work, size
+        d_s, d_g, d_y, d_invA_y, d_direc,
+        d_block_sg, d_block_yinvAy, d_block_yinvAg,
+        size
     );
+    cudaStreamSynchronize(stream);
+
+    // Compute final result on CPU
+    double sg = 0.0, yinvAy = 0.0, yinvAg = 0.0;
+    for (int i = 0; i < numBlocks; i++)
+    {
+        sg += h_sg[i];
+        yinvAy += h_yinvAy[i];
+        yinvAg += h_yinvAg[i];
+    }
+
+    // direc += term1 * s - term2 * invA_y
+    // term1 = (1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys
+    // term2 = sg_ys
+    const double sg_ys = sg / ys;
+    const double term1 = (1.0 / reg + yinvAy / ys) * sg_ys - yinvAg / ys;
+    const double term2 = sg_ys;
 
     // Call second kernel function
     update_direc_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
-        d_direc, d_invA_y, d_s, 
-        d_work, ys, reg, size
+        d_s, d_invA_y, term1, term2, d_direc, size
     );
-
-    // Free workspace
-    CUDA_CHECK(cudaFree(d_work));
 }

@@ -85,7 +85,7 @@ void launch_line_search_computation(
 );
 
 // Helper function to compute low-rank vectors y and s
-// From sinkhorn_splr_kernel.cu
+// From sinkhorn_splr_kernel_low_rank.cu
 void launch_low_rank(
     const double* d_grad,
     const double* d_grad_prev,
@@ -96,20 +96,22 @@ void launch_low_rank(
     double& ys,
     double& yy,
     int size,
+    double* h_pinned,
     cudaStream_t stream = cudaStreamPerThread
 );
 
 // Helper function to compute search direction with low-rank terms
-// From sinkhorn_splr_kernel.cu
+// From sinkhorn_splr_kernel_low_rank.cu
 void launch_low_rank_search_direc(
     double* d_direc,
     const double* d_invA_y,
     const double* d_g,
     const double* d_y,
     const double* d_s,
-    const double ys,
-    const double reg,
+    double ys,
+    double reg,
     int size,
+    double* h_pinned,
     cudaStream_t stream = cudaStreamPerThread
 );
 
@@ -412,7 +414,13 @@ public:
         // s = gamma - gamma_prev
         // ys = y's
         // yy = y'y
-        launch_low_rank(d_grad, d_grad_prev, d_gamma, d_gamma_prev, d_y, d_s, ys, yy, m_Hsize, cudaStreamPerThread);
+        launch_low_rank(
+            d_grad, d_grad_prev, d_gamma, d_gamma_prev,
+            d_y, d_s, ys, yy,
+            m_Hsize,
+            h_pinned,
+            cudaStreamPerThread
+        );
     }
 
     // Compute Sinkhorn iterate
@@ -582,7 +590,7 @@ public:
             // yinvAy = y'(invA_y), yinvAg = y'(invA_g) = y'(direc)
             // sg_ys = sg / ys
             // direc += ((1 / reg + yinvAy / ys) * sg_ys - yinvAg / ys) * s - sg_ys * invA_y
-            launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_reg, m_Hsize, stream);
+            launch_low_rank_search_direc(d_direc, d_invA_y, d_grad, d_y, d_s, ys, m_reg, m_Hsize, h_pinned, stream);
         }
         timer.toc("low_rank");
 
