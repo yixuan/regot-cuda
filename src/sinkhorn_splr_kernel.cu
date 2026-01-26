@@ -41,6 +41,7 @@
 #define BLOCK_DIM_X 32
 #define BLOCK_DIM_Y 8
 #define BLOCK_DIM 256
+#define MAX_NUM_BLOCK_1D 256
 
 
 
@@ -91,9 +92,9 @@
 // 3. Indices of (Tsp_t)', with the mapping
 //        (i, j) in T -> (j, i) in T'/(T_t)' -> (n+j, i) in Hsl -> (n+j)*N+i for flattened indices
 
-// To finish this task, we construct three core functions that are mainly run on GPU
+// To finish this task, we construct three core functions that mainly run on GPU
 // 1. A fused CUDA kernel that focuses on the computation on T:
-//    (a) Tsum, Trowsums, and Tcolsums
+//    (a) Trowsums and Tcolsums
 //    (b) Flattened T' values (Tvalues) and indices (Tflatind),
 //        which are used for downstream sparsification
 //        We need to exclude the last row of T' in the output Tvalues
@@ -207,7 +208,7 @@ void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStream
 
 // Fused CUDA kernel for computation on T
 // 1. Compute T[i, j] = exp(...)
-// 2. Perform parallel reduction for row sums, column sums, and total sum using shared memory
+// 2. Perform parallel reduction for row sums and column sums using shared memory
 // 3. Write (T_t)' (T' excluding the last row) to Tvalues
 // 4. Compute the flat indices in the Hsl matrix coordinates for the subsequent Top-K selection
 //
@@ -218,7 +219,6 @@ void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStream
 // In: M              [n*m]
 // Out: Trowsums      [n]    assuming initialized to zero
 // Out: Tcolsums      [m]    assuming initialized to zero
-// Out: Tsum          [1]    assuming initialized to zero
 // Out: Tvalues       [n*(m-1)]
 // Out: Tflatind      [n*(m-1)]
 __global__ void T_fused_kernel(
@@ -231,7 +231,6 @@ __global__ void T_fused_kernel(
     bool write_values_and_indices,
     double* __restrict__ Trowsums,
     double* __restrict__ Tcolsums,
-    double* __restrict__ Tsum,
     double* __restrict__ Tvalues,
     int* __restrict__ Tflatind
 )
@@ -249,12 +248,9 @@ __global__ void T_fused_kernel(
 
     // Shared memory for partial column sums
     // Each block contains an array of size BLOCK_DIM_X
-    // s_col_sum[tx] collects the sum of the tx-th
-    // column in this block
+    // s_col_sum[tx] collects the sum of the tx-th column in this block
     // Each block column is of length BLOCK_DIM_Y
     __shared__ double s_col_sum[BLOCK_DIM_X];
-    // Collects the sum of the entire block
-    __shared__ double s_block_sum;
 
     // Indices
     const int tx = threadIdx.x;
@@ -272,17 +268,10 @@ __global__ void T_fused_kernel(
     {
         s_col_sum[tx] = 0.0;
     }
-    if (tx == 0 && ty == 0)
-    {
-        s_block_sum = 0.0;
-    }
     __syncthreads();
 
     // This variable collects T_ij values on different strides
     double Tij_stride_sum = 0.0;
-    // This variable collects warp row sums on different strides
-    // (only meaningful for land_id == 0)
-    double warp_row_stride_sum = 0.0;
     // Quantities that do not vary with i
     const bool j_lt_m = (j < m);
     const bool write_val_ind = write_values_and_indices && (j < m - 1);
@@ -337,7 +326,6 @@ __global__ void T_fused_kernel(
         // since BLOCK_DIM_X can be a multiple of warpSize
         if (is_lane0)
         {
-            warp_row_stride_sum += warp_row_sum;
             atomicAdd(&Trowsums[i], warp_row_sum);
         }
     }
@@ -357,100 +345,213 @@ __global__ void T_fused_kernel(
     {
         atomicAdd(&Tcolsums[j], s_col_sum[tx]);
     }
-
-    // 7. Compute block total sum
-    //    First compute warp sums, and then aggregate warp sums to block sum
-    // const double warp_row_stride_sum = warp_reduce_sum(Tij_stride_sum);
-    if (is_lane0)
-    {
-        atomicAdd(&s_block_sum, warp_row_stride_sum);
-    }
-
-    // Make sure s_block_sum has finished
-    __syncthreads();
-
-    // 8. Write block total sum to global memory
-    if (tx == 0 && ty == 0)
-    {
-        atomicAdd(Tsum, s_block_sum);
-    }
 }
 
 // CUDA kernel to compute objective function value (f) and gradient (g)
 //
-// f = reg * sum(T) - <alpha, a> - <beta, b>
+// f = reg * sum(T) - <alpha, a> - <beta, b> = reg * <Trowsums, 1> - <gamma, ab>
 // g = (Trowsums - a, Tcolsums_t - b_t)
 //
-// In: ab        [n+m]       ab = (a, b)
-// In: gamma     [n+m]       gamma = (alpha, beta)
-// In: Trowsums  [n]
-// In: Tcolsums  [m]
-// In: Tsum      [1]
-// Out: objfn    [1]
-// Out: grad     [n+m-1]
+// If compute_squared_grad = true, also compute blockwise sum of squared gradients
+//
+// In: ab            [n+m]       ab = (a, b)
+// In: gamma         [n+m]       gamma = (alpha, beta)
+// In: Trowsums      [n]
+// In: Tcolsums      [m]
+// Out: grad         [n+m-1]
+// Out: block_objfn  [MAX_NUM_BLOCK_1D]
+// Out: block_g2     [MAX_NUM_BLOCK_1D]
 __global__ void obj_grad_kernel(
     const double* __restrict__ ab,
     const double* __restrict__ gamma,
     const double* __restrict__ Trowsums,
     const double* __restrict__ Tcolsums,
-    const double* __restrict__ Tsum,
     double reg,
     int n,
     int m,
-    double* __restrict__ objfn,
-    double* __restrict__ grad
+    bool compute_squared_grad,
+    double* __restrict__ grad,
+    double* __restrict__ block_objfn,
+    double* __restrict__ block_g2
 )
 {
     // Indices
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
-    int total_len = n + m;
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    const int idx = bid * blockDim.x + tid;
+    const int stride = blockDim.x * gridDim.x;
+    const int total_len = n + m;
+    const int grad_len = total_len - 1;
 
+    // Local variable to accumulate Trowsums
+    double local_Tsum = 0.0;
     // Local variable to accumulate the dot product <gamma, ab> = <alpha, a> + <beta, b>
     double local_dotprod = 0.0;
+    // Local variable to accumulate squared gradient
+    double local_g2 = 0.0;
 
     // Grid-stride loop instead of `if (idx < total_len)`
     for (int i = idx; i < total_len; i += stride)
     {
+        // Task 1: Accumulate dot product
         double val_ab = ab[i];
         double val_gamma = gamma[i];
-
-        // Task 1: Accumulate dot product
         local_dotprod += val_ab * val_gamma;
 
         // Task 2: Calculate gradient
         // Note that grad is only [n + m - 1]
-        if (i < n)
+        if (i < grad_len)
         {
-            // First n elements: Trowsums - a
-            grad[i] = Trowsums[i] - val_ab;
-        } 
-        else if (i < n + m - 1)
-        {
-            // Next m-1 elements: Tcolsums_t - b_t
-            // Current i corresponds to index (i - n) in b
-            grad[i] = Tcolsums[i - n] - val_ab;
+            double val_grad = 0.0;
+
+            // First n elements of grad: Trowsums - a
+            // Task 3: Also accumulate Trowsums
+            if (i < n)
+            {
+                // Accumulate Trowsums
+                double val_Tr = Trowsums[i];
+                local_Tsum += val_Tr;
+                // Compute gradient
+                val_grad = val_Tr - val_ab;
+            }
+            else
+            {
+                // Next m-1 elements of grad: Tcolsums_t - b_t
+                // Current i corresponds to index (i - n) in b
+                val_grad = Tcolsums[i - n] - val_ab;
+            }
+            grad[i] = val_grad;
+
+            // Task 4: Accumulate squared gradient
+            if (compute_squared_grad)
+            {
+                local_g2 += val_grad * val_grad;
+            }
         }
+
         // Note that when i == n + m - 1 (i.e., the last element of b),
         // we do not write to grad, but still compute <gamma, ab>
     }
 
-    // Parallel reduction to calculate the dot product
+    // Parallel reductions
+    local_Tsum = block_reduce_sum(local_Tsum);
     local_dotprod = block_reduce_sum(local_dotprod);
-
-    // Atomically accumulate block results to global objfn
-    if (tid == 0)
+    if (compute_squared_grad)
     {
-        // Let objfn hold -<gamma, ab>
-        atomicAdd(objfn, -local_dotprod);
+        local_g2 = block_reduce_sum(local_g2);
     }
 
-    // Handle constant term reg * Tsum
-    // Only one thread needs to do this once
-    if (idx == 0)
+    // Write to block results
+    if (tid == 0)
     {
-        atomicAdd(objfn, reg * (*Tsum));
+        block_objfn[bid] = reg * local_Tsum - local_dotprod;
+        if (compute_squared_grad)
+        {
+            block_g2[bid] = local_g2;
+        }
+    }
+}
+
+// Helper function to launch CUDA computations on T
+//
+// Given gamma = (alpha, beta), M, ab = (a, b) (all on device), and reg:
+// 1. Compute T matrix
+// 2. Compute row/column sums of T
+// 3. Compute objective function value objfn and gradient grad
+//
+// In: d_gamma      [n+m]        d_gamma = (d_alpha, d_beta)
+// In: d_M          [n*m]
+// In: d_ab         [n+m]
+// Out: d_grad      [n+m-1]
+// Out: objfn       [1]
+// Out: gnorm       [1]
+// Out: d_work      [n+m+n*(m-1)]    (d_Trowsums, d_Tcolsums, d_Tvalues)
+// OUt: d_iwork     [n*(m-1)]        d_Tflatind
+// Work: h_pinned   [2*MAX_NUM_BLOCK_1D]
+void launch_T_objfn_grad(
+    const double* d_gamma,
+    const double* d_M,
+    const double* d_ab,
+    double reg,
+    int n, int m,
+    bool write_values_and_indices,
+    bool compute_grad_norm,
+    double* d_grad,
+    double& objfn, double& gnorm,
+    double* d_work, int* d_iwork,
+    double* h_pinned,
+    cudaStream_t stream = cudaStreamPerThread
+)
+{
+    // Pointer aliases
+    const double* d_alpha = d_gamma;
+    const double* d_beta = d_gamma + n;
+    double* d_Trowsums = d_work;
+    double* d_Tcolsums = d_work + n;
+    double* d_Tvalues = d_work + (n + m);
+    int* d_Tflatind = d_iwork;
+
+    // Initialize work space d_work = (d_Trowsums, d_Tcolsums) to be zero
+    CUDA_CHECK(cudaMemsetAsync(d_work, 0, (n + m) * sizeof(double), stream));
+
+    // Compute dimensions
+    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
+    dim3 gridDim;
+    gridDim.x = (m + blockDim.x - 1) / blockDim.x;
+    gridDim.y = (n + blockDim.y - 1) / blockDim.y;
+    // The grid must cover all the columns, meaning that gridDim.x
+    // must be m/BLOCK_DIM_X. But gridDim.y can be arbitrary, since
+    // a grid-stride loop is implemented on the y direction
+    // Then we use heuristics to adjust the total number of blocks
+    gridDim.y = heuristic_num_blocks(gridDim.x, gridDim.y);
+
+    // Launch the fused kernel
+    T_fused_kernel<<<gridDim, blockDim, 0, stream>>>(
+        d_alpha, d_beta, d_M,
+        reg, n, m,
+        write_values_and_indices,
+        d_Trowsums, d_Tcolsums,
+        d_Tvalues, d_Tflatind
+    );
+
+    // Compute objfn, grad, and <grad, grad>
+    dim3 threadsPerBlock(BLOCK_DIM);
+    int numBlocks = (n + m + threadsPerBlock.x - 1) / threadsPerBlock.x;
+    // Limit number of blocks to MAX_NUM_BLOCK_1D (256)
+    // The grid-stride loop in obj_grad_kernel() will handle larger sizes
+    numBlocks = std::min(numBlocks, MAX_NUM_BLOCK_1D);
+
+    // Get device pointers to pinned memory
+    double* d_block_result;
+    cudaHostGetDevicePointer(&d_block_result, h_pinned, 0);
+
+    const double* h_objfn = h_pinned;
+    const double* h_g2 = h_pinned + MAX_NUM_BLOCK_1D;
+    double* d_block_objfn = d_block_result;
+    double* d_block_g2 = d_block_result + MAX_NUM_BLOCK_1D;
+
+    obj_grad_kernel<<<numBlocks, threadsPerBlock, 0, stream>>>(
+        d_ab, d_gamma, d_Trowsums, d_Tcolsums,
+        reg, n, m,
+        compute_grad_norm,
+        d_grad, d_block_objfn, d_block_g2
+    );
+    cudaStreamSynchronize(stream);
+
+    // Compute final result on CPU
+    objfn = 0.0;
+    double g2 = 0.0;
+    for (int i = 0; i < numBlocks; i++)
+    {
+        objfn += h_objfn[i];
+        if (compute_grad_norm)
+        {
+            g2 += h_g2[i];
+        }
+    }
+    if (compute_grad_norm)
+    {
+        gnorm = std::sqrt(g2);
     }
 }
 
@@ -488,73 +589,6 @@ __global__ void write_diagonal_kernel(
         values[idx] = (idx < n) ? (Trowsums[idx] + shift) : (Tcolsums[idx - n] + shift);
         indices[idx] = idx * (Hsize + 1);
     }
-}
-
-// Helper function to launch CUDA computations on T
-//
-// Given gamma = (alpha, beta), M, ab = (a, b) (all on device), and reg:
-// 1. Compute T matrix
-// 2. Compute row/column/total sums of T
-// 3. Compute objective function value objfn and gradient grad
-//
-// In: d_gamma      [n+m]        d_gamma = (d_alpha, d_beta)
-// In: d_M          [n*m]
-// In: d_ab         [n+m]
-// Out: d_Trowsums  [n]
-// Out: d_Tcolsums  [m]
-// Out: d_Tsum      [1]
-// Out: d_objfn     [1]
-// Out: d_grad      [n+m-1]
-// Out: d_Tvalues   [n*(m-1)]
-// Out: d_Tflatind  [n*(m-1)]
-void launch_T_computation(
-    const double* d_gamma,
-    const double* d_M,
-    const double* d_ab,
-    double reg,
-    int n, int m,
-    bool write_values_and_indices,
-    double* d_Trowsums, double* d_Tcolsums, double* d_Tsum,
-    double* d_objfn, double* d_grad,
-    double* d_Tvalues, int* d_Tflatind,
-    cudaStream_t stream = cudaStreamPerThread
-)
-{
-    // Pointer aliases
-    const double* d_alpha = d_gamma;
-    const double* d_beta = d_gamma + n;
-
-    // Zero out the reduction arrays
-    CUDA_CHECK(cudaMemsetAsync(d_Trowsums, 0, n * sizeof(double), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_Tcolsums, 0, m * sizeof(double), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_Tsum, 0, sizeof(double), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_objfn, 0, sizeof(double), stream));
-
-    // Compute dimensions
-    dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    dim3 gridDim;
-    gridDim.x = (m + blockDim.x - 1) / blockDim.x;
-    gridDim.y = (n + blockDim.y - 1) / blockDim.y;
-    // The grid must cover all the columns, meaning that gridDim.x
-    // must be m/BLOCK_DIM_X. But gridDim.y can be arbitrary, since
-    // a grid-stride loop is implemented on the y direction
-    // Then we use heuristics to adjust the total number of blocks
-    gridDim.y = heuristic_num_blocks(gridDim.x, gridDim.y);
-
-    // Launch the fused kernel
-    T_fused_kernel<<<gridDim, blockDim, 0, stream>>>(
-        d_alpha, d_beta, d_M, reg, n, m, write_values_and_indices,
-        d_Trowsums, d_Tcolsums, d_Tsum, d_Tvalues, d_Tflatind
-    );
-
-    // Compute objfn and grad
-    dim3 threadsPerBlock(BLOCK_DIM);
-    dim3 numBlocks_obj_grad((n + m + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    obj_grad_kernel<<<numBlocks_obj_grad, threadsPerBlock, 0, stream>>>(
-        d_ab, d_gamma, d_Trowsums, d_Tcolsums, d_Tsum,
-        reg, n, m,
-        d_objfn, d_grad
-    );
 }
 
 // Helper function to compute sparse representation of H
@@ -795,39 +829,31 @@ void launch_csr_conversion(
     CUDA_CHECK(cudaFree(d_temp_storage));
 }
 
-// Helper function to compute objective function value objfn,
-// gradient grad, and sparsified Hessian (plus a shift) in CSR form
+// Helper function to compute sparsified Hessian (plus a shift) in CSR form
 //
-// In: d_gamma      [n+m]  d_gamma = (d_alpha, d_beta)
-// In: d_M          [n*m]
-// In: d_ab         [n+m]
-// Out: d_objfn     [1]
-// Out: d_grad      [Hsize] = [n+m-1]
-// Out: d_Hvalues   [nnz] = [K+Hsize], reserve [Kmax+Hsize]
-// Out: d_Hflatind  [nnz], reserve [Kmax+Hsize]
-// Out: d_Hcolind   [nnz], reserve [Kmax+Hsize]
-// Out: d_Hrowptr   [Hsize + 1] = [n+m]
-// Working space: d_work = (d_Trowsums, d_Tcolsums, d_Tsum, d_Tvalues), [n+m+1+n*(m-1)]
-// Working space: d_iwork = d_Tflatind/d_row_counts, [max(n*(m-1), n+m-1)]
-//
-// Stage 1 computes objective function value and gradient
-// Stage 2 computes sparsified Hessian
+// In: d_gamma       [n+m]  d_gamma = (d_alpha, d_beta)
+// In: d_M           [n*m]
+// In: d_work        [n+m+n*(m-1)]  assuming it contains (d_Trowsums, d_Tcolsums, d_Tvalues)
+// In/Work: d_iwork  [max(n*(m-1), n+m-1)]  assuming it contains d_Tflatind when passed in
+//                                          will be overwritten on exit
+// Out: d_Hvalues    [nnz] = [K+Hsize], reserve [Kmax+Hsize]
+// Out: d_Hflatind   [nnz], reserve [Kmax+Hsize]
+// Out: d_Hcolind    [nnz], reserve [Kmax+Hsize]
+// Out: d_Hrowptr    [Hsize + 1] = [n+m]
 //
 // If fixed_indices = true, it means:
 // 1. The first (K+Hsize) elements of d_Hflatind contain the sparsify pattern of Hsl
 // 2. We keep d_Hflatind unchanged, and compute the corresponding Hsl values
 // 3. Write these Hsl values to d_Hvalues
 // 4. Continue computing d_Hcolind and d_Hrowptr
-void launch_objfn_grad_sphess(
+void launch_sphess(
     const double* d_gamma,
     const double* d_M,
-    const double* d_ab,
+    const double* d_work,
+    int* d_iwork,
     double reg, double shift,
     int n, int m, int K,
-    double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hflatind, int* d_Hcolind, int* d_Hrowptr,
-    double* d_work, int* d_iwork,
-    bool stage1 = true, bool stage2 = true,
     bool fixed_indices = false,
     cudaStream_t stream = cudaStreamPerThread
 )
@@ -835,78 +861,58 @@ void launch_objfn_grad_sphess(
     // Pointer aliases
     const double* d_alpha = d_gamma;
     const double* d_beta = d_gamma + n;
-    double* d_Trowsums = d_work;
-    double* d_Tcolsums = d_work + n;
-    double* d_Tsum = d_work + (n + m);
-    double* d_Tvalues = d_work + (n + m + 1);
-    int* d_Tflatind = d_iwork;
+    const double* d_Trowsums = d_work;
+    const double* d_Tcolsums = d_work + n;
+    const double* d_Tvalues = d_work + (n + m);
+    const int* d_Tflatind = d_iwork;
 
-    if (stage1)
+    // Dimensions
+    size_t Te = n * (m - 1);
+    size_t Hsize = n + m - 1;
+    size_t Ks = std::max(K, 1);
+    Ks = std::min(Ks, Te);
+    size_t KHsize = Ks + Hsize;
+
+    // Get d_Hvalues and d_Hflatind
+    if (fixed_indices)
     {
-        // If indices are fixed, we do not need to compute
-        // d_Tvalues and d_Tflatind in the first stage
-        bool write_values_and_indices = (!fixed_indices);
-        launch_T_computation(
-            d_gamma, d_M, d_ab,
-            reg, n, m,
-            write_values_and_indices,
-            d_Trowsums, d_Tcolsums, d_Tsum,
-            d_objfn, d_grad,
+        // If indices are fixed, we directly recompute d_Hvalues according to d_Hflatind
+
+        // The first (K+Hsize) elements of d_Hflatind are already given
+        // Now write elements of Hsl to d_Hvalues
+        dim3 threadsPerBlock(BLOCK_DIM);
+        int numBlocks = (KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x;
+        // Adjust number of blocks using heuristics
+        // The grid-stride loop in recompute_nonzero_values_kernel()
+        // will handle larger sizes
+        numBlocks = heuristic_num_blocks(numBlocks);
+        dim3 numBlocks_recompute_nonzero_values(numBlocks);
+        recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock, 0, stream>>>(
+            d_Hflatind, d_Trowsums, d_Tcolsums, d_alpha, d_beta, d_M,
+            reg, shift, n, m, Ks, d_Hvalues
+        );
+    }
+    else
+    {
+        // Otherwise, call launch_H_sparsification to get
+        // d_Hvalues and d_Hflatind
+        launch_H_sparsification(
             d_Tvalues, d_Tflatind,
+            d_Trowsums, d_Tcolsums,
+            n, m, Ks, shift,
+            d_Hvalues, d_Hflatind,
             stream
         );
     }
 
-    if (stage2)
-    {
-        // Dimensions
-        size_t Te = n * (m - 1);
-        size_t Hsize = n + m - 1;
-        size_t Ks = max(K, 1);
-        Ks = min(Ks, Te);
-        size_t KHsize = Ks + Hsize;
+    // Finally, call launch_csr_conversion to compute d_Hcolind and d_Hrowptr
 
-        // Get d_Hvalues and d_Hflatind
-        if (fixed_indices)
-        {
-            // If indices are fixed, we directly recompute d_Hvalues according to d_Hflatind
-
-            // The first (K+Hsize) elements of d_Hflatind are already given
-            // Now write elements of Hsl to d_Hvalues
-            dim3 threadsPerBlock(BLOCK_DIM);
-            int numBlocks = (KHsize + threadsPerBlock.x - 1) / threadsPerBlock.x;
-            // Adjust number of blocks using heuristics
-            // The grid-stride loop in recompute_nonzero_values_kernel()
-            // will handle larger sizes
-            numBlocks = heuristic_num_blocks(numBlocks);
-            dim3 numBlocks_recompute_nonzero_values(numBlocks);
-            recompute_nonzero_values_kernel<<<numBlocks_recompute_nonzero_values, threadsPerBlock, 0, stream>>>(
-                d_Hflatind, d_Trowsums, d_Tcolsums, d_alpha, d_beta, d_M,
-                reg, shift, n, m, Ks, d_Hvalues
-            );
-        }
-        else
-        {
-            // Otherwise, call launch_H_sparsification to get
-            // d_Hvalues and d_Hflatind
-            launch_H_sparsification(
-                d_Tvalues, d_Tflatind,
-                d_Trowsums, d_Tcolsums,
-                n, m, Ks, shift,
-                d_Hvalues, d_Hflatind,
-                stream
-            );
-        }
-
-        // Finally, call launch_csr_conversion to compute d_Hcolind and d_Hrowptr
-
-        // Now d_Tflatind is no longer used, so we can reuse
-        // d_iwork for the working space
-        int* d_row_counts = d_iwork;
-        launch_csr_conversion(
-            d_Hflatind, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m, stream
-        );
-    }
+    // Now d_Tflatind is no longer used, so we can reuse
+    // d_iwork for the working space
+    int* d_row_counts = d_iwork;
+    launch_csr_conversion(
+        d_Hflatind, d_Hcolind, d_Hrowptr, d_row_counts, Ks, n, m, stream
+    );
 }
 
 // CUDA kernel to compute low-rank vectors y and s
@@ -1189,8 +1195,8 @@ void T_computation_sparsify_host(
     const double* b,
     double reg, double shift,
     int n, int m, int K,
-    double* Trowsums, double* Tcolsums, double* Tsum,
-    double* objfn, double* grad,
+    double* Trowsums, double* Tcolsums,
+    double* objfn, double* grad, double* gnorm,
     double* Tvalues, int* Tflatind,
     double* csr_val, int* csr_rowptr, int* csr_colind
 )
@@ -1211,32 +1217,35 @@ void T_computation_sparsify_host(
 
     // Allocate device memory
     double *d_gamma, *d_M, *d_ab;
-    double *d_Trowsums, *d_Tcolsums, *d_Tsum, *d_Tvalues;
-    double *d_objfn, *d_grad;
+    double *d_work;
+    double *d_grad;
     double *d_Hvalues;
     int *d_Tflatind, *d_Hflatind, *d_csr_rowptr, *d_csr_colind, *d_row_counts;
 
     CUDA_CHECK(cudaMalloc(&d_gamma, (n + m) * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_M, Me * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_ab, (n + m) * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Trowsums, n * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Tcolsums, m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Tsum, sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_work, (n + m + Te) * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_grad, Hsize * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Tvalues, Te * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Tflatind, Te * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_Hvalues, nnz * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_Tflatind, Te * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_Hflatind, nnz * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_colind, nnz * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_csr_rowptr, (Hsize + 1) * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&d_row_counts, Hsize * sizeof(int)));
+
+    // Allocate pinned memory
+    double* h_pinned;
+    CUDA_CHECK(cudaHostAlloc(&h_pinned, 512 * sizeof(double), cudaHostAllocMapped));
 
     // Pointer aliases
     double* d_alpha = d_gamma;
     double* d_beta = d_gamma + n;
     double* d_a = d_ab;
     double* d_b = d_ab + n;
+    double *d_Trowsums = d_work;
+    double *d_Tcolsums = d_work + n;
+    double *d_Tvalues = d_work + (n + m);
 
     // Copy input data from host to device
     CUDA_CHECK(cudaMemcpy(d_alpha, alpha, n * sizeof(double), cudaMemcpyHostToDevice));
@@ -1249,13 +1258,14 @@ void T_computation_sparsify_host(
     // Multiple runs for benchmarking
     for (int i = 0; i < nrun; i++)
     {
-        launch_T_computation(
+        launch_T_objfn_grad(
             d_gamma, d_M, d_ab,
             reg, n, m,
-            true,
-            d_Trowsums, d_Tcolsums, d_Tsum,
-            d_objfn, d_grad,
-            d_Tvalues, d_Tflatind
+            true, true,
+            d_grad,
+            *objfn, *gnorm,
+            d_work, d_Tflatind,
+            h_pinned
         );
         launch_H_sparsification(
             d_Tvalues, d_Tflatind,
@@ -1275,8 +1285,6 @@ void T_computation_sparsify_host(
     // Copy results back to host
     CUDA_CHECK(cudaMemcpy(Trowsums, d_Trowsums, n * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tcolsums, d_Tcolsums, m * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(Tsum, d_Tsum, sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(objfn, d_objfn, sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(grad, d_grad, Hsize * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tvalues, d_Tvalues, Te * sizeof(double), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(Tflatind, d_Tflatind, Te * sizeof(int), cudaMemcpyDeviceToHost));
@@ -1290,16 +1298,15 @@ void T_computation_sparsify_host(
     CUDA_CHECK(cudaFree(d_gamma));
     CUDA_CHECK(cudaFree(d_M));
     CUDA_CHECK(cudaFree(d_ab));
-    CUDA_CHECK(cudaFree(d_Trowsums));
-    CUDA_CHECK(cudaFree(d_Tcolsums));
-    CUDA_CHECK(cudaFree(d_Tsum));
-    CUDA_CHECK(cudaFree(d_objfn));
+    CUDA_CHECK(cudaFree(d_work));
     CUDA_CHECK(cudaFree(d_grad));
-    CUDA_CHECK(cudaFree(d_Tvalues));
-    CUDA_CHECK(cudaFree(d_Tflatind));
     CUDA_CHECK(cudaFree(d_Hvalues));
+    CUDA_CHECK(cudaFree(d_Tflatind));
     CUDA_CHECK(cudaFree(d_Hflatind));
     CUDA_CHECK(cudaFree(d_csr_colind));
     CUDA_CHECK(cudaFree(d_csr_rowptr));
     CUDA_CHECK(cudaFree(d_row_counts));
+
+    // Free pinned memory
+    CUDA_CHECK(cudaFreeHost(h_pinned));
 }
