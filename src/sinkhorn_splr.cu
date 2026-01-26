@@ -28,30 +28,59 @@
         } \
     } while (0)
 
-// Define block dimensions (16x16 = 256 threads)
-#define BLOCK_DIM_X 16
-#define BLOCK_DIM_Y 16
+// Define block dimension
 #define BLOCK_DIM 256
+#define MAX_NUM_BLOCK_1D 256
 
 // Helper function to transform the gamma=(alpha, beta) vector to gamma'=(alpha', beta_t', 0)
 // alpha += beta[m-1], beta -= beta[m-1]
 // From sinkhorn_splr_kernel.cu
 void shift_gamma(double* d_gamma, int n, int m, cudaStream_t stream = cudaStreamPerThread);
 
-// Helper function to compute objective function value objfn,
+// Helper functions to compute objective function value objfn,
 // gradient grad, and sparsified Hessian in CSR form
 // From sinkhorn_splr_kernel.cu
-void launch_objfn_grad_sphess(
+void launch_T_objfn_grad(
     const double* d_gamma,
     const double* d_M,
     const double* d_ab,
+    double reg,
+    int n, int m,
+    bool write_values_and_indices,
+    bool compute_grad_norm,
+    double* d_grad,
+    double& objfn, double& gnorm,
+    double* d_work, int* d_iwork,
+    double* h_pinned,
+    cudaStream_t stream = cudaStreamPerThread
+);
+void launch_sphess(
+    const double* d_gamma,
+    const double* d_M,
+    const double* d_work,
+    int* d_iwork,
     double reg, double shift,
     int n, int m, int K,
-    double* d_objfn, double* d_grad,
     double* d_Hvalues, int* d_Hflatind, int* d_Hcolind, int* d_Hrowptr,
-    double* d_work, int* d_iwork,
-    bool stage1 = true, bool stage2 = true,
     bool fixed_indices = false,
+    cudaStream_t stream = cudaStreamPerThread
+);
+
+// Helper function for line search computation
+void launch_line_search_computation(
+    const double* d_gamma_prev,
+    const double* d_direc,
+    double step,
+    const double* d_M,
+    const double* d_ab,
+    double reg,
+    int n, int m,
+    double* d_gamma,
+    double* d_grad,
+    double& objfn,
+    double& dg,
+    double* d_work, int* d_iwork, double* h_pinned,
+    bool write_values_and_indices = true,
     cudaStream_t stream = cudaStreamPerThread
 );
 
@@ -110,13 +139,13 @@ private:
     std::thread   m_sinkhorn_thread;
     std::atomic<bool> m_sinkhorn_stop_flag;
     double*       d_gamma_bcd;
-    double*       d_objfn_bcd;
     double*       d_grad_bcd;
+    double        m_objfn_bcd;
+    double        m_gnorm_bcd;
     // Pointer aliases, d_gamma = (d_alpha, d_beta)
     double*       d_alpha;
     double*       d_beta;
-    // Objective function value and gradient
-    double*       d_objfn;
+    // Gradient
     double*       d_grad;
     double*       d_grad_prev;
     // Search direction and low-rank vectors
@@ -173,9 +202,7 @@ public:
         CUDA_CHECK(cudaMalloc(&d_gamma, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma_prev, (m_n + m_m) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_gamma_bcd, (m_n + m_m) * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_objfn_bcd, sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_grad_bcd, m_Hsize * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_objfn, sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_grad_prev, m_Hsize * sizeof(double)));
         // In computing the search direction, we need to solve
         // A * direc = grad or A * [direc, invA_y] = [grad, y],
@@ -196,11 +223,11 @@ public:
         CUDA_CHECK(cudaMalloc(&d_Hflatind, (Kmax + m_Hsize) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_Hcolind, (Kmax + m_Hsize) * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_Hrowptr, (m_Hsize + 1) * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&d_work, (m_n + m_m + 1 + m_Te) * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_work, (m_n + m_m + m_Te) * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_iwork, std::max(m_Te, m_Hsize) * sizeof(int)));
 
         // Pinned memory
-        CUDA_CHECK(cudaHostAlloc(&h_pinned, 1024 * sizeof(double), cudaHostAllocMapped));
+        CUDA_CHECK(cudaHostAlloc(&h_pinned, (4 * MAX_NUM_BLOCK_1D) * sizeof(double), cudaHostAllocMapped));
 
         // Pointer aliases
         d_alpha = d_gamma;
@@ -241,9 +268,7 @@ public:
         CUDA_CHECK(cudaFree(d_gamma));
         CUDA_CHECK(cudaFree(d_gamma_prev));
         CUDA_CHECK(cudaFree(d_gamma_bcd));
-        CUDA_CHECK(cudaFree(d_objfn_bcd));
         CUDA_CHECK(cudaFree(d_grad_bcd));
-        CUDA_CHECK(cudaFree(d_objfn));
         CUDA_CHECK(cudaFree(d_grad_prev));
         CUDA_CHECK(cudaFree(d_linsolve_rhs));
         CUDA_CHECK(cudaFree(d_linsolve_sol));
@@ -323,15 +348,29 @@ public:
     }
 
     // Compute objective function value, gradient, and sparsified Hessian
-    // Stage 1 computes objective function value and gradient
-    // Stage 2 computes sparsified Hessian
-    size_t dual_objfn_grad_sphess(
-        double density, double shift, double& objfn,
-        bool stage1 = true, bool stage2 = true,
+    void dual_T_objfn_grad(
+        double& objfn, double& gnorm,
+        bool compute_gnorm = true,
         bool fixed_indices = false
     )
     {
-        nvtx3::scoped_range r{"dual_objfn_grad_sphess"};
+        nvtx3::scoped_range r{"dual_T_objfn_grad"};
+
+        // launch computation
+        launch_T_objfn_grad(
+            d_gamma, d_M, d_ab,
+            m_reg, m_n, m_m,
+            !fixed_indices,
+            compute_gnorm,
+            d_grad, objfn, gnorm,
+            d_work, d_iwork, h_pinned,
+            cudaStreamPerThread
+        );
+    }
+
+    size_t dual_sphess(double density, double shift, bool fixed_indices = false)
+    {
+        nvtx3::scoped_range r{"dual_sphess"};
 
         // Make sure density is within (0, 1)
         density = std::min(density, 1.0);
@@ -343,19 +382,13 @@ public:
         K = std::max(K, size_t(1));
 
         // launch computation
-        launch_objfn_grad_sphess(
-            d_gamma, d_M, d_ab,
+        launch_sphess(
+            d_gamma, d_M, d_work, d_iwork,
             m_reg, shift, m_n, m_m, K,
-            d_objfn, d_grad,
             d_Hvalues, d_Hflatind, d_Hcolind, d_Hrowptr,
-            d_work, d_iwork,
-            stage1, stage2,
             fixed_indices,
             cudaStreamPerThread
         );
-
-        // Copy d_objfn to host
-        CUDA_CHECK(cudaMemcpy(&objfn, d_objfn, sizeof(double), cudaMemcpyDeviceToHost));
 
         // Return number of nonzeros in sparsified Hessian
         size_t nnz = K + m_Hsize;
@@ -409,14 +442,13 @@ private:
         shift_gamma(d_gamma_bcd, m_n, m_m, m_sinkhorn_stream);
 
         // Compute the objective function value and gradient of the Sinkhorn iterate
-        launch_objfn_grad_sphess(
+        launch_T_objfn_grad(
             d_gamma_bcd, d_M, d_ab,
-            m_reg, 0.001, m_n, m_m, 1,  // shift = 0.001, K=1 are placeholders, not used in stage1
-            d_objfn_bcd, d_grad_bcd,    // Objective function value and gradient written to these pointers
-            d_Hvalues, d_Hflatind, d_Hcolind, d_Hrowptr,  // placeholders here, not used in stage1
-            d_work, d_iwork,
-            true, false,  // stage1, stage2
-            true,         // fixed_indices = true makes stage1 not writing to d_Tvalues and d_Tflatind
+            m_reg, m_n, m_m,
+            false,  // write_values_and_indices = false means not writing to d_Tvalues and d_Tflatind
+            true,   // compute gradient norm
+            d_grad_bcd, m_objfn_bcd, m_gnorm_bcd,
+            d_work, d_iwork, h_pinned,
             m_sinkhorn_stream
         );
     }
@@ -463,8 +495,8 @@ public:
     {
         nvtx3::scoped_range r{"objfn_gnorm_bcd"};
 
-        gnorm = compute_l2_norm_cuda(d_grad_bcd, h_pinned, m_Hsize, cudaStreamPerThread);
-        CUDA_CHECK(cudaMemcpy(&objfn, d_objfn_bcd, sizeof(double), cudaMemcpyDeviceToHost));
+        objfn = m_objfn_bcd;
+        gnorm = m_gnorm_bcd;
     }
 
     // Compute search direction (with low-rank term)
@@ -626,13 +658,17 @@ public:
         double fx_lo = fx_init, dg_lo = dg_init;
 
         // Evaluate the current step size
-        // gamma = gamma_prev + step * direc
-        compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize, cudaStreamPerThread);
-        // We only compute f and g, so label stage1 = true, stage2 = false
-        // In this case shift and K are not used
-        dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
-        // Get g'(direc)
-        dg = compute_dot_prod_cuda(d_grad, d_direc, h_pinned, m_Hsize, cudaStreamPerThread);
+        // 1. gamma = gamma_prev + step * direc
+        // 2. Compute f and g
+        // 3. Compute <g, direc>
+        launch_line_search_computation(
+            d_gamma_prev, d_direc, step,
+            d_M, d_ab, m_reg, m_n, m_m,
+            d_gamma, d_grad, fx, dg,
+            d_work, d_iwork, h_pinned,
+            !fixed_indices,
+            cudaStreamPerThread
+        );
         new_obj = fx;
 
         // Convergence test
@@ -720,9 +756,14 @@ public:
             }
 
             // Update parameter, function value, and gradient
-            compute_axpy_cuda(d_direc, d_gamma_prev, step, d_gamma, m_Hsize, cudaStreamPerThread);
-            dual_objfn_grad_sphess(0.01, 0.001, fx, true, false, fixed_indices);
-            dg = compute_dot_prod_cuda(d_grad, d_direc, h_pinned, m_Hsize, cudaStreamPerThread);
+            launch_line_search_computation(
+                d_gamma_prev, d_direc, step,
+                d_M, d_ab, m_reg, m_n, m_m,
+                d_gamma, d_grad, fx, dg,
+                d_work, d_iwork, h_pinned,
+                !fixed_indices,
+                cudaStreamPerThread
+            );
             new_obj = fx;
 
             // Convergence test
@@ -870,17 +911,17 @@ void cuda_sinkhorn_splr(
 
     // Initial objective function value (f), gradient (g),
     // and sparsified Hessian (sphess)
-    double objfn;
-    // Only compute f and g by setting stage1 = true, stage2 = false
-    // Note: shift should be applied to Hessian, but what we compute is Hsl = H * reg
-    // Therefore, here we multiply shift by reg before adding to Hsl
-    solver.dual_objfn_grad_sphess(density, shift * reg, objfn, true, false);
-    // Now we can compute ||grad||, which will be used for updating shift
-    double gnorm = solver.grad_norm();
+    double objfn, gnorm;
+    // Only compute f and g
+    constexpr bool compute_gnorm = true;
+    solver.dual_T_objfn_grad(objfn, gnorm, compute_gnorm, false);
+    // ||grad|| will be used for updating shift
     double gnorm_init = gnorm;
     shift = std::min(gnorm, shift_max);
-    // Then continue computing sphess by setting stage1 = false, stage2 = true
-    size_t nnz = solver.dual_objfn_grad_sphess(density, shift * reg, objfn, false, true);
+    // Then continue computing sphess by
+    // Note: shift should be applied to Hessian, but what we compute is Hsl = H * reg
+    // Therefore, here we multiply shift by reg before adding to Hsl
+    size_t nnz = solver.dual_sphess(density, shift * reg, false);
 
     // Main iteration
     // Initial step size
@@ -956,30 +997,33 @@ void cuda_sinkhorn_splr(
         // so we do not need to explicitly call cudaDeviceSynchronize() here
 
         // Wolfe Line Search
-        // Will overwrite d_gamma, d_objfn, and d_grad
+        // Will overwrite d_gamma and d_grad
         // If the updated recompute_fg is false, then the overwritten d_gamma
-        // is the new point, and d_objfn and d_grad contain the corresponding
+        // is the new point, and objfn and d_grad contain the corresponding
         // objective function value and gradient, respectively
-        // Otherwise, we need to recompute d_gamma, d_objfn, and d_grad
+        // Otherwise, we need to recompute d_gamma, objfn, and d_grad
         bool recompute_fg = true;
         alpha = solver.line_search_wolfe(
             std::min(1.0, 1.5 * alpha), objfn, objfn, recompute_fg, !update_pattern
         );
         timer_inner.toc("line_search");
 
-        // Recompute the new point if needed
+        // Recompute the new point if needed, and compute the new gradient norm
+        const double gnorm_pre = gnorm;
         if (recompute_fg)
         {
             // d_gamma = d_gamma_prev + alpha * direc
             solver.update_gamma(alpha);
             // Compute f and g on new point d_gamma
-            solver.dual_objfn_grad_sphess(density, shift * reg, objfn, true, false, !update_pattern);
+            // Also compute gradient norm
+            solver.dual_T_objfn_grad(objfn, gnorm, true, !update_pattern);        }
+        else
+        {
+            // f and g have been computed in line search,
+            // so we only compute gradient norm here
+            gnorm = solver.grad_norm();
         }
         timer_inner.toc("grad");
-
-        // Compute the new gradient norm
-        const double gnorm_pre = gnorm;
-        gnorm = solver.grad_norm();
 
         // If analyze_pattern is true, it means that we have also computed the Sinkhorn iterate
         // If it is better than the quasi-Newton direction (both objfn and gnorm are smaller),
@@ -988,7 +1032,8 @@ void cuda_sinkhorn_splr(
         {
             double objfn_bcd, gnorm_bcd;
             solver.objfn_gnorm_bcd(objfn_bcd, gnorm_bcd);
-            const bool use_sinkhorn_iter = ((objfn_bcd < objfn) && (gnorm_bcd < gnorm));
+            // const bool use_sinkhorn_iter = ((objfn_bcd < objfn) && (gnorm_bcd < gnorm));
+            const bool use_sinkhorn_iter = ((objfn_bcd < objfn) && (gnorm_bcd < 10 * gnorm));
 
             if (verbose >= 2)
             {
@@ -1001,9 +1046,10 @@ void cuda_sinkhorn_splr(
 
             if (use_sinkhorn_iter)
             {
+                // Overwrite d_gamma with the Sinkhorn iterate
                 solver.update_gamma_sinkhorn();
-                solver.dual_objfn_grad_sphess(density, shift * reg, objfn, true, false, !update_pattern);
-                gnorm = solver.grad_norm();
+                // Recompute objfn and gnorm
+                solver.dual_T_objfn_grad(objfn, gnorm, true, !update_pattern);
             }
         }
 
@@ -1017,7 +1063,7 @@ void cuda_sinkhorn_splr(
 
         // Compute sphess
         shift = std::min(gnorm, shift_max);
-        nnz = solver.dual_objfn_grad_sphess(density, shift * reg, objfn, false, true, !update_pattern);
+        nnz = solver.dual_sphess(density, shift * reg, !update_pattern);
         timer_inner.toc("sphess");
 
         if (verbose >= 2)
