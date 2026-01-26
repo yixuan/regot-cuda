@@ -50,14 +50,15 @@ def test_csr_conversion():
     Tsum = np.sum(T)
     Trowsums = np.sum(T, axis=1)
     Tcolsums = np.sum(T, axis=0)
-    print(f"T total sum: {Tsum:.6f}")
     print(f"T row sums: {Trowsums}")
     print(f"T column sums: {Tcolsums}")
     print()
     objfn = reg * Tsum - alpha.dot(a) - beta.dot(b)
     grad = np.concatenate((Trowsums - a, Tcolsums[:-1] - b[:-1]))
+    gnorm = np.linalg.norm(grad)
     print(f"Objfn = {objfn:.6f}")
     print(f"Grad = {grad}")
+    print(f"GradNorm = {gnorm}")
     print()
 
     # Exclude last column
@@ -84,13 +85,13 @@ def test_csr_conversion():
         )
 
         print_header("T Computation Results")
-        print(f"Total sum: {result['Tsum']:.6f}")
         print(f"Row sums: {result['Trowsums']}")
         print(f"Column sums: {result['Tcolsums']}")
         print()
 
         print(f"Objfn: {result['objfn']:.6f}")
         print(f"Grad: {result['grad']}")
+        print(f"GradNorm: {result['gnorm']}")
         print()
 
         csr_val = result["csr_val"]
@@ -102,12 +103,6 @@ def test_csr_conversion():
         print()
 
         print_header("Verification")
-        Tsum_diff = np.abs(Tsum - result["Tsum"])
-        if Tsum_diff < 1e-8:
-            print(f"✓ Tsum matches, difference = {Tsum_diff}")
-        else:
-            print(f"✗ Tsum does not match, difference = {Tsum_diff}")
-        
         Trowsums_diff = np.linalg.norm(Trowsums - result["Trowsums"])
         if Trowsums_diff < 1e-8:
             print(f"✓ Trowsums matches, difference = {Trowsums_diff}")
@@ -131,6 +126,12 @@ def test_csr_conversion():
             print(f"✓ Grad matches, difference = {grad_diff}")
         else:
             print(f"✗ Grad does not match, difference = {grad_diff}")
+        
+        gnorm_diff = np.abs(gnorm - result["gnorm"])
+        if gnorm_diff < 1e-8:
+            print(f"✓ GradNorm matches, difference = {gnorm_diff}")
+        else:
+            print(f"✗ GradNorm does not match, difference = {gnorm_diff}")
 
         val_diff = np.linalg.norm(Hsl.data - csr_val)
         if val_diff < 1e-8:

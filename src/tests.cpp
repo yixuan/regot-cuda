@@ -18,8 +18,8 @@ void T_computation_sparsify_host(
     const double* b,
     double reg, double shift,
     int n, int m, int K,
-    double* Trowsums, double* Tcolsums, double* Tsum,
-    double* objfn, double* grad,
+    double* Trowsums, double* Tcolsums,
+    double* objfn, double* grad, double* gnorm,
     double* Tvalues, int* Tflatind,
     double* csr_val, int* csr_rowptr, int* csr_colind
 );
@@ -114,11 +114,11 @@ py::dict test_T_computation_sparsify(
     int* colind_ptr = static_cast<int*>(colind_buf.ptr);
 
     // Call CUDA function
-    double Tsum, objfn;
+    double objfn, gnorm;
     T_computation_sparsify_host(
         nrun,
         alpha_ptr, beta_ptr, M_ptr, a_ptr, b_ptr, reg, shift, n, m, Ks,
-        Trowsums_ptr, Tcolsums_ptr, &Tsum, &objfn, grad_ptr, Tvalues_ptr, Tflatind_ptr,
+        Trowsums_ptr, Tcolsums_ptr, &objfn, grad_ptr, &gnorm, Tvalues_ptr, Tflatind_ptr,
         val_ptr, rowptr_ptr, colind_ptr
     );
 
@@ -126,9 +126,9 @@ py::dict test_T_computation_sparsify(
     py::dict result;
     result["Trowsums"] = Trowsums;
     result["Tcolsums"] = Tcolsums;
-    result["Tsum"] = Tsum;
     result["objfn"] = objfn;
     result["grad"] = grad;
+    result["gnorm"] = gnorm;
     result["Tvalues"] = Tvalues;
     result["Tflatind"] = Tflatind;
 
