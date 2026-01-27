@@ -177,7 +177,7 @@ public:
         bool input_on_device = false
     ):
         m_n(n), m_m(m), m_Me(n * m), m_Te(n * (m - 1)), m_Hsize(n + m - 1), m_Kmax(Kmax), m_reg(reg),
-        d_M_storage(nullptr)
+        d_M_storage(nullptr), m_sinkhorn_stop_flag(true)
     {
         nvtx3::scoped_range r{"SPLRSolver"};
 
@@ -428,21 +428,6 @@ public:
 private:
     // Some helper functions
     //
-    // Sinkhorn loops that listen to the stopping flag
-    void sinkhorn_loop()
-    {
-        const double* d_loga = d_logab;
-        const double* d_logb = d_logab + m_n;
-        double* d_alpha_bcd = d_gamma_bcd;
-        double* d_beta_bcd = d_gamma_bcd + m_n;
-
-        while (!m_sinkhorn_stop_flag.load())
-        {
-            compute_optimal_beta(d_M, d_alpha_bcd, d_logb, d_beta_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
-            compute_optimal_alpha(d_M, d_beta_bcd, d_loga, d_alpha_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
-            cudaStreamSynchronize(m_sinkhorn_stream);
-        }
-    }
     // Compute objective function value and gradient on the Sinkhorn iterate
     void post_sinkhorn_iterate()
     {
@@ -460,32 +445,33 @@ private:
             m_sinkhorn_stream
         );
     }
-public:
-    // Main function
-    // niter > 0  =>  run a fixed number of Sinkhorn iterations
-    // niter < 0  =>  automatically fill GPU idle time
-    // niter = 0  =>  no Sinkhorn iterations
-    void compute_sinkhorn_iterate(int niter = 3)
+    // Sinkhorn loops that listen to the stopping flag
+    void sinkhorn_loop_signal()
     {
-        nvtx3::scoped_range r{"compute_sinkhorn_iterate"};
-
         const double* d_loga = d_logab;
         const double* d_logb = d_logab + m_n;
         double* d_alpha_bcd = d_gamma_bcd;
         double* d_beta_bcd = d_gamma_bcd + m_n;
 
-        // Read beta from d_gamma and write BCD-computed alpha to d_gamma_bcd
-        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
-
-        // If niter < 0, we create a new thread to launch CUDA kernels, and the thread will finish
-        // after m_sinkhorn_stop_flag is set to true in compute_search_direc()
-        if (niter < 0)
+        int i = 0;
+        while (!m_sinkhorn_stop_flag.load() && i < 1000)
         {
-            // Launch Sinkhorn iteration loop
-            m_sinkhorn_stop_flag.store(false);
-            m_sinkhorn_thread = std::thread(&SPLRSolver::sinkhorn_loop, this);
-            return;
+            compute_optimal_beta(d_M, d_alpha_bcd, d_logb, d_beta_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+            compute_optimal_alpha(d_M, d_beta_bcd, d_loga, d_alpha_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+            cudaStreamSynchronize(m_sinkhorn_stream);
+            i++;
         }
+
+        // Compute objective function value and gradient on the Sinkhorn iterate
+        post_sinkhorn_iterate();
+    }
+    // Sinkhorn loops with a fixed number of iterations
+    void sinkhorn_loop_fixed(int niter)
+    {
+        const double* d_loga = d_logab;
+        const double* d_logb = d_logab + m_n;
+        double* d_alpha_bcd = d_gamma_bcd;
+        double* d_beta_bcd = d_gamma_bcd + m_n;
 
         // Sinkhorn iterations
         for (int i = 0; i < niter; i++)
@@ -496,6 +482,38 @@ public:
 
         // Compute objective function value and gradient on the Sinkhorn iterate
         post_sinkhorn_iterate();
+    }
+public:
+    // Main function
+    // niter > 0  =>  run a fixed number of Sinkhorn iterations
+    // niter < 0  =>  automatically fill GPU idle time
+    // niter = 0  =>  no Sinkhorn iterations
+    void compute_sinkhorn_iterate(int niter = 3)
+    {
+        nvtx3::scoped_range r{"compute_sinkhorn_iterate"};
+
+        const double* d_loga = d_logab;
+        double* d_alpha_bcd = d_gamma_bcd;
+
+        // Read beta from d_gamma and write BCD-computed alpha to d_gamma_bcd
+        compute_optimal_alpha(d_M, d_beta, d_loga, d_alpha_bcd, m_reg, m_n, m_m, m_sinkhorn_stream);
+
+        // If niter < 0, we create a new thread to launch CUDA kernels, and the thread will finish
+        // after m_sinkhorn_stop_flag is set to true in compute_search_direc()
+        //
+        // If niter > 0, we create a new thread to run a fixed number of Sinkhorn iterations
+        // The thread will finish at save_history()
+        if (niter < 0)
+        {
+            // Launch Sinkhorn iteration loop that listens to the stopping flag
+            m_sinkhorn_stop_flag.store(false);
+            m_sinkhorn_thread = std::thread(&SPLRSolver::sinkhorn_loop_signal, this);
+        }
+        else
+        {
+             // Launch Sinkhorn iteration loop with a fixed number of iterations
+            m_sinkhorn_thread = std::thread(&SPLRSolver::sinkhorn_loop_fixed, this, niter);
+        }
     }
 
     // Get objective function value and gradient norm of the Sinkhorn iterate
@@ -559,15 +577,19 @@ public:
             m_linsolver.reorder();
             timer.toc("reorder");
 
-            // After the reordering part, we can stop Sinkhorn iterations
-            // This only works for the case of candidate_sinkhorn_iter < 0,
-            // since otherwise the thread is not joinable
-            m_sinkhorn_stop_flag.store(true);
-            if (m_sinkhorn_thread.joinable())
+            // After the reordering part, we can stop the thread running
+            // sinkhorn_loop_signal(), since the factorization step later will run on GPU
+            //
+            // But we do not want to stop sinkhorn_loop_fixed() until save_history(),
+            // so we query m_sinkhorn_stop_flag here. This flag is only set to false for 
+            // sinkhorn_loop_signal()
+            if (!m_sinkhorn_stop_flag.load())
             {
-                m_sinkhorn_thread.join();
-                // Compute objective function value and gradient on the Sinkhorn iterate
-                post_sinkhorn_iterate();
+                m_sinkhorn_stop_flag.store(true);
+                if (m_sinkhorn_thread.joinable())
+                {
+                    m_sinkhorn_thread.join();
+                }
             }
 
             m_linsolver.symfac();
@@ -615,6 +637,12 @@ public:
 
         CUDA_CHECK(cudaMemcpy(d_gamma_prev, d_gamma, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
         CUDA_CHECK(cudaMemcpy(d_grad_prev, d_grad, m_Hsize * sizeof(double), cudaMemcpyDeviceToDevice));
+
+        // Finish the thread in charge of Sinkhorn iterations
+        if (m_sinkhorn_thread.joinable())
+        {
+            m_sinkhorn_thread.join();
+        }
     }
 
     // More-Thuente line search with Wolfe conditions
