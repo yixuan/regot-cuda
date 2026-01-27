@@ -573,9 +573,14 @@ public:
 
         if (analyze_pattern)
         {
-            // Reordering stage mainly runs on CPU
-            m_linsolver.reorder();
-            timer.toc("reorder");
+            // Scope for NVTX3 annotation
+            {
+                nvtx3::scoped_range reorder{"reorder"};
+
+                // Reordering stage mainly runs on CPU
+                m_linsolver.reorder();
+                timer.toc("reorder");
+            }
 
             // After the reordering part, we can stop the thread running
             // sinkhorn_loop_signal(), since the factorization step later will run on GPU
@@ -592,8 +597,12 @@ public:
                 }
             }
 
-            m_linsolver.symfac();
-            timer.toc("symfac");
+            // Scope for NVTX3 annotation
+            {
+                nvtx3::scoped_range sym_fac{"sym_fac"};
+                m_linsolver.symfac();
+                timer.toc("symfac");
+            }
         }
         m_linsolver.factorize();
         timer.toc("factorize");
