@@ -2,14 +2,46 @@ import os
 import sys
 from pathlib import Path
 from glob import glob
+import requests
+import tarfile
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 from setuptools import setup
 import subprocess
 
 __version__ = "0.1.0"
 
-# The directory that contains setup.py
-SETUP_DIRECTORY = Path(__file__).resolve().parent
+# Download CCCL source files and return include directory
+def get_cccl_include():
+    # The directory that contains setup.py
+    SETUP_DIRECTORY = str(Path(__file__).resolve().parent)
+
+    CCCL_URL = "https://github.com/NVIDIA/cccl/releases/download/v3.2.1/cccl-v3.2.1.tar.gz"
+    CCCL_DIRNAME = "cccl-v3.2.1"
+
+    # Test whether the environment variable CCCL_INCLUDE_DIR is set
+    # If yes, directly return this directory
+    cccl_include_dir = os.environ.get("CCCL_INCLUDE_DIR", None)
+    if cccl_include_dir is not None:
+        return cccl_include_dir
+
+    # If the directory already exists (e.g. from previous setup),
+    # directly return it
+    cccl_dir = os.path.join(SETUP_DIRECTORY, CCCL_DIRNAME)
+    cccl_include_dir = os.path.join(cccl_dir, "include")
+    if os.path.exists(cccl_include_dir):
+        return cccl_include_dir
+
+    # Filename for the downloaded CCCL source package
+    download_target_file = os.path.join(SETUP_DIRECTORY, "cccl-v3.2.1.tar.gz")
+    response = requests.get(CCCL_URL, stream=True)
+    with open(download_target_file, "wb") as file:
+        for chunk in response.iter_content(chunk_size=1024):
+            file.write(chunk)
+    # Unzip package
+    with tarfile.open(download_target_file, "r:gz") as tar:
+        tar.extractall(filter="data")
+
+    return cccl_include_dir
 
 # Try to import PyTorch's CUDA extension utilities
 TORCH_BUILD = False
@@ -21,6 +53,8 @@ except ImportError:
     print("PyTorch not found, will use custom build extension")
     TORCH_BUILD = False
 
+TORCH_BUILD = False
+
 if TORCH_BUILD:
     # Use PyTorch's CUDAExtension (simpler configuration)
     ext_modules = [
@@ -28,7 +62,7 @@ if TORCH_BUILD:
             name="curegot._internal",
             sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
             include_dirs=[
-                "include/cccl",
+                get_cccl_include(),
                 os.path.join(sys.exec_prefix, "include")
             ],
             library_dirs=[
@@ -175,7 +209,7 @@ ext_modules = [
         name="curegot._internal",
         sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
         include_dirs=[
-            "include/cccl",
+            get_cccl_include(),
             os.path.join(cuda_path, "include")
         ],
         library_dirs=[
