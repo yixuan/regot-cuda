@@ -8,13 +8,14 @@ RegOT-CUDA is a CUDA-accelerated library for optimal transport computation, prov
 
 ## Work in Progress
 
-The RegOT-CUDA package is a work in progress. Currently we have implemented the block coordinate descent (BCD) algorithm for entropic-regularized optimal transport, which is equivalent to the well-known Sinkhorn algorithm in the logarithmic scale. More state-of-the-art solvers are under development, and a list of candidate algorithms can be found in the [RegOT-Python](https://github.com/yixuan/regot-python) package.
+The RegOT-CUDA package is a work in progress. Currently we have implemented the block coordinate descent algorithm (BCD) and the sparse-plus-low-rank quasi-Newton method (SPLR) for entropic-regularized optimal transport. More state-of-the-art solvers are under development, and a list of candidate algorithms can be found in the [RegOT-Python](https://github.com/yixuan/regot-python) package.
 
 ## Requirements
 
-- Python >= 3.10
+- Python >= 3.11
 - NumPy >= 1.23.0
-- CUDA Toolkit >= 11.0
+- PyTorch >= 2.10 (optional, for PyTorch interface)
+- CUDA Toolkit >= 13.0
 - Compatible NVIDIA GPU
 - C++ compiler (C++11 or higher, for building from source)
 
@@ -22,17 +23,20 @@ The RegOT-CUDA package is a work in progress. Currently we have implemented the 
 
 ### Environment Setup
 
-It is recommended to use Conda to create a virtual environment and install necessary packages (using Linux as an example):
+The CUDA development environment is required to build this package from source.
+You can install the C++ compiler and CUDA libraries using Conda:
 
 ```bash
 # Create CUDA development environment
 conda create -n nvdev
 conda activate nvdev
-conda install python=3.12 numpy scipy matplotlib notebook ipywidgets gxx_linux-64
-conda install -c nvidia cuda-toolkit libcudss-dev
+conda install python=3.12 numpy gxx_linux-64
+conda install -c nvidia cuda-toolkit=13.1 libcudss-dev cuda-nvtx-dev
+pip install torch --index-url https://download.pytorch.org/whl/cu130
+pip install requests pybind11
 ```
 
-To compile RegOT-CUDA, you need to set the `CUDA_HOME` environment variable, for example:
+You also need to set the `CUDA_HOME` environment variable, for example:
 
 ```bash
 export CUDA_HOME=/usr/local/cuda
@@ -42,17 +46,20 @@ If you use the Conda installation method above, you can run the following comman
 
 ```bash
 conda activate nvdev
-conda env config vars set CUDA_HOME="<path_to_conda>/envs/<nvdev>/targets/<x86_64-linux>/"
+conda env config vars set CUDA_HOME="<path_to_conda>/envs/nvdev/"
 ```
 
-Please replace `<path_to_conda>` with your Conda installation directory, `<nvdev>` with your virtual environment name (which is `nvdev` according to the installation commands above), and `<x86_64-linux>` with the corresponding installation directory for your operating system (which is `x86_64-linux` on Linux).
+Some additional packages are needed to run the numerical experiments:
+
+```bash
+pip install scipy matplotlib pot cupy-cuda13x "jax[cuda13]" ott-jax
+```
 
 ### Build and Install
 
 ```bash
 cd regot-cuda
-pip install pybind11
-pip install .
+pip install --no-build-isolation .
 ```
 
 ### Verify Installation
@@ -78,8 +85,13 @@ b = b / np.sum(b)         # Normalize
 reg = 0.1                 # Regularization parameter
 
 # Call algorithm
-result = curegot.sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=1)
-plan = result["plan"]
+result1 = curegot.numpy.sinkhorn_bcd(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=1)
+plan1 = result1["plan"]
+print(plan1[:3, :3])
+
+result2 = curegot.numpy.sinkhorn_splr(M, a, b, reg, tol=1e-6, max_iter=1000, verbose=1)
+plan2 = result2["plan"]
+print(plan2[:3, :3])
 ```
 
 ## Tests
@@ -88,4 +100,5 @@ plan = result["plan"]
 cd regot-cuda/test
 pip install regot
 python test_sinkhorn_bcd.py
+python test_sinkhorn_splr.py
 ```
