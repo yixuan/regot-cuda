@@ -15,8 +15,8 @@ def get_cccl_include():
     # The directory that contains setup.py
     SETUP_DIRECTORY = str(Path(__file__).resolve().parent)
 
-    CCCL_URL = "https://github.com/NVIDIA/cccl/releases/download/v3.2.1/cccl-v3.2.1.tar.gz"
-    CCCL_DIRNAME = "cccl-v3.2.1"
+    CCCL_URL = "https://github.com/NVIDIA/cccl/releases/download/v3.3.0/cccl-v3.3.0.tar.gz"
+    CCCL_DIRNAME = "cccl-v3.3.0"
 
     # Test whether the environment variable CCCL_INCLUDE_DIR is set
     # If yes, directly return this directory
