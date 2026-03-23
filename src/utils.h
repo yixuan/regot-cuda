@@ -211,8 +211,8 @@ inline double step_selection(
         const double res = choose_ac ? ac : as;
         // Postprocessing the chosen step
         return (at > al) ?
-            std::min(at + deltau * (au - at), res) :
-            std::max(at + deltau * (au - at), res);
+            (std::min)(at + deltau * (au - at), res) :
+            (std::max)(at + deltau * (au - at), res);
     }
 
     // Simple extrapolation if au, fu, or gu is infinity
@@ -225,6 +225,6 @@ inline double step_selection(
     // Case 4: ft <= fl, gt * gl >= 0, |gt| >= |gl|
     // The following is not used in the paper, but it seems to be a reasonable safeguard
     return (at > al) ?
-        std::min(at + deltau * (au - at), ae) :
-        std::max(at + deltau * (au - at), ae);
+        (std::min)(at + deltau * (au - at), ae) :
+        (std::max)(at + deltau * (au - at), ae);
 }

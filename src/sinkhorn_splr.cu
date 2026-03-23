@@ -661,6 +661,7 @@ public:
         double c1 = 1e-4, double c2 = 0.9, int max_iter = 20
     )
     {
+        using std::abs;
         nvtx3::scoped_range r{"line_search_wolfe"};
 
         // We assume d_gamma has been copied to d_gamma_prev,
@@ -676,7 +677,10 @@ public:
         recompute_fg = false;
 
         // Initial step size
-        double step = init_step, step_max = 2.0;
+        constexpr double step_min = 1e-10, step_max = 2.0;
+        init_step = (std::max)(init_step, step_min);
+        init_step = (std::min)(init_step, step_max);
+        double step = init_step;
         double fx = cur_obj, dg = compute_dot_prod_cuda(d_grad_prev, d_direc, h_pinned, m_Hsize, cudaStreamPerThread);
 
         // Save the function value at the current x
@@ -687,7 +691,7 @@ public:
         if (dg_init > 0.0)
         {
             recompute_fg = true;
-            return step;
+            return init_step;
         }
 
         // Tolerance for convergence test
@@ -697,110 +701,32 @@ public:
         const double test_curv = -c2 * dg_init;
 
         // The bracketing interval
-        double I_lo = 0.0, I_hi = std::numeric_limits<double>::infinity();
-        double fI_lo = 0.0, fI_hi = std::numeric_limits<double>::infinity();
-        double gI_lo = (1.0 - c1) * dg_init, gI_hi = std::numeric_limits<double>::infinity();
+        constexpr double Inf = std::numeric_limits<double>::infinity();
+        double I_lo = 0.0, I_hi = Inf;
+        double fI_lo = 0.0, fI_hi = Inf;
+        double gI_lo = (1.0 - c1) * dg_init, gI_hi = Inf;
+        double psiI_lo = fI_lo;
         double fx_lo = fx_init, dg_lo = dg_init;
 
-        // Evaluate the current step size
-        // 1. gamma = gamma_prev + step * direc
-        // 2. Compute f and g
-        // 3. Compute <g, direc>
-        launch_line_search_computation(
-            d_gamma_prev, d_direc, step,
-            d_M, d_ab, m_reg, m_n, m_m,
-            d_gamma, d_grad, fx, dg,
-            d_work, d_iwork, h_pinned,
-            !fixed_indices,
-            cudaStreamPerThread
-        );
-        new_obj = fx;
+        // Status variables
+        bool bracketed = false;
+        bool f_is_psi = true;
+        bool use_step_min_safeguard = (step_min > 0.0);
+        double I_width = Inf;
+        double I_width_prev = Inf;
+        int I_shrink_fail_count = 0;
 
-        // Convergence test
-        if (fx <= fx_init + step * test_decr && std::abs(dg) <= test_curv)
-        {
-            return step;
-        }
-
-        // Extrapolation factor
-        constexpr double delta = 1.1;
+        // Constants
+        constexpr double delta_max = 1.1;
+        constexpr double delta_min = 7.0 / 12;
+        constexpr double shrink = 0.66;
         int iter;
         for (iter = 0; iter < max_iter; iter++)
         {
-            // ft = psi(step) = f(xp + step * drt) - f(xp) - step * test_decr
-            // gt = psi'(step) = dg - mu * dg_init
-            // mu = c1
-            const double ft = fx - fx_init - step * test_decr;
-            const double gt = dg - c1 * dg_init;
-
-            // Update step size and bracketing interval
-            double new_step;
-            if (ft > fI_lo)
-            {
-                // Case 1: ft > fl
-                new_step = step_selection(I_lo, I_hi, step, fI_lo, fI_hi, ft, gI_lo, gI_hi, gt);
-                // Sanity check: if the computed new_step is too small, typically due to
-                // extremely large value of ft, switch to the middle point
-                if (new_step <= 1e-12)
-                    new_step = (I_lo + step) / 2.0;
-
-                I_hi = step;
-                fI_hi = ft;
-                gI_hi = gt;
-            }
-            else if (gt * (I_lo - step) > 0.0)
-            {
-                // Case 2: ft <= fl, gt * (al - at) > 0
-                //
-                // Page 291 of Moré and Thuente (1994) suggests that
-                // newat = min(at + delta * (at - al), amax), delta in [1.1, 4]
-                new_step = std::min(step_max, step + delta * (step - I_lo));
-
-                I_lo = step;
-                fI_lo = ft;
-                gI_lo = gt;
-                fx_lo = fx;
-                dg_lo = dg;
-            }
-            else
-            {
-                // Case 3: ft <= fl, gt * (al - at) <= 0
-                new_step = step_selection(I_lo, I_hi, step, fI_lo, fI_hi, ft, gI_lo, gI_hi, gt);
-
-                I_hi = I_lo;
-                fI_hi = fI_lo;
-                gI_hi = gI_lo;
-
-                I_lo = step;
-                fI_lo = ft;
-                gI_lo = gt;
-                fx_lo = fx;
-                dg_lo = dg;
-            }
-
-            // Case 1 and 3 are interpolations, whereas Case 2 is extrapolation
-            // This means that Case 2 may return new_step = step_max,
-            // and we need to decide whether to accept this value
-            // 1. If both step and new_step equal to step_max, it means
-            //    step will have no further change, so we accept it
-            // 2. Otherwise, we need to test the function value and gradient
-            //    on step_max, and decide later
-
-            // In case step, new_step, and step_max are equal, directly return the computed x and fx
-            if (step == step_max && new_step >= step_max)
-            {
-                return step;
-            }
-            // Otherwise, recompute x and fx based on new_step
-            step = new_step;
-
-            if (step < 1e-12 || step > 1e12)
-            {
-                recompute_fg = true;
-                return init_step;
-            }
-
-            // Update parameter, function value, and gradient
+            // Evaluate the current step size
+            // 1. gamma = gamma_prev + step * direc
+            // 2. Compute f and g
+            // 3. Compute <g, direc>
             launch_line_search_computation(
                 d_gamma_prev, d_direc, step,
                 d_M, d_ab, m_reg, m_n, m_m,
@@ -811,44 +737,162 @@ public:
             );
             new_obj = fx;
 
+            // phi(step) = f(xp + step * drt) = fx
+            // phi'(step) = g(xp + step * drt)^T d = dg
+            // psi(step) = f(xp + step * drt) - f(xp) - step * test_decr
+            // psi'(step) = dg - test_decr
+            const double psit = fx - fx_init - step * test_decr;
+            const double dpsit = dg - test_decr;
+
             // Convergence test
-            if (fx <= fx_init + step * test_decr && std::abs(dg) <= test_curv)
+            if (psit <= 0.0 && abs(dg) <= test_curv)
             {
                 return step;
             }
 
-            // Now assume step = step_max, and we need to decide whether to
-            // exit the line search (see the comments above regarding step_max)
-            // If we reach here, it means this step size does not pass the convergence
-            // test, so either the sufficient decrease condition or the curvature
-            // condition is not met yet
-            //
-            // Typically the curvature condition is harder to meet, and it is
-            // possible that no step size in [0, step_max] satisfies the condition
-            //
-            // But we need to make sure that its psi function value is smaller than
-            // the best one so far. If not, go to the next iteration and find a better one
-            if (step >= step_max)
+            // Test whether step hits the boundaries and satisfies the exit conditions
+            if (step <= step_min && (psit > 0.0 || dpsit >= 0.0))
             {
-                const double ft_bound = fx - fx_init - step * test_decr;
-                if (ft_bound <= fI_lo)
+                return step;
+            }
+            if (step >= step_max && (psit <= 0.0 && dpsit < 0.0))
+            {
+                return step;
+            }
+
+            // Check and update the status of f_is_psi
+            // f is initially set to psi, and is changed to phi in
+            // subsequent iterations if psi(step) <= 0 and phi'(step) >= 0
+            //
+            // NOTE: empirically we find that using psi is usually better,
+            //       so for now we do not follow the implementation of Moré and Thuente (1994)
+            /*
+            if (f_is_psi && (psit <= 0.0 && dg >= 0.0))
+            {
+                f_is_psi = false;
+            }
+            */
+            const double ft = f_is_psi ? psit : fx;
+            const double gt = f_is_psi ? dpsit : dg;
+
+            // Check and update the status of use_step_min_safeguard
+            // We impose a safeguarding rule that guarantees testing
+            // step_min if psi(alpha_k) > 0 or psi'(alpha_k) >= 0
+            // holds from the beginning
+            if (use_step_min_safeguard && (psit <= 0.0 && dpsit < 0.0))
+            {
+                use_step_min_safeguard = false;
+            }
+
+            // Update new step
+            double new_step;
+            const bool in_case_2 = (psit <= psiI_lo) && (dpsit * (I_lo - step) > 0.0);
+            if (in_case_2)
+            {
+                // For Case 2, we apply the safeguarding rule
+                // newat = min(at + delta * (at - al), amax), delta in [1.1, 4]
+                new_step = (std::min)(step_max, step + delta_max * (step - I_lo));
+            }
+            else
+            {
+                // For Case 1 and Case 3, use information of f and g to select new step
+                new_step = step_selection(I_lo, I_hi, step, fI_lo, fI_hi, ft, gI_lo, gI_hi, gt);
+                // Force new step in [step_min, step_max]
+                new_step = (std::max)(new_step, step_min);
+                new_step = (std::min)(new_step, step_max);
+
+                // Apply safeguarding rule related to step_min when necessary:
+                //     step+ in [alpha_min, max{delta_min * step, alpha_min}]
+                //
+                // If use_step_min_safeguard = true, then new_step cannot be obtained
+                // from Case 2, since in Case 2 we have
+                //     psi(alpha_k) <= 0 and psi'(alpha_k) < 0
+                if (use_step_min_safeguard)
                 {
-                    return step;
+                    const double lower = step_min;
+                    const double upper = (std::max)(step_min, delta_min * step);
+                    new_step = (std::max)(new_step, lower);
+                    new_step = (std::min)(new_step, upper);
                 }
             }
+
+            // Update bracketing interval
+            if (psit > psiI_lo)
+            {
+                // Case 1: psi(step) > psi(I_lo)
+                I_hi = step;
+                fI_hi = ft;
+                gI_hi = gt;
+            }
+            else if (in_case_2)
+            {
+                // Case 2: psi(step) <= psi(I_lo), psi'(step)(I_lo - step) > 0
+                I_lo = step;
+                fI_lo = ft;
+                gI_lo = gt;
+                psiI_lo = psit;
+                fx_lo = fx;
+                dg_lo = dg;
+            }
+            else
+            {
+                // Case 3: psi(step) <= psi(I_lo), psi'(step)(I_lo - step) <= 0
+                I_hi = I_lo;
+                fI_hi = fI_lo;
+                gI_hi = gI_lo;
+
+                I_lo = step;
+                fI_lo = ft;
+                gI_lo = gt;
+                psiI_lo = psit;
+                fx_lo = fx;
+                dg_lo = dg;
+            }
+
+            // Check and update the status of bracketed
+            // bracketed is true if we have entered Case 1 or Case 3,
+            // and I is contained in [step_min, step_max]
+            if ((!bracketed) && (!in_case_2))
+            {
+                const double I_left = (std::min)(I_lo, I_hi);
+                const double I_right = (std::max)(I_lo, I_hi);
+                bracketed = (I_left >= step_min && I_right <= step_max);
+            }
+
+            // If bracketed, enforce sufficient interval shrink; if not shrinking enough, use bisection
+            if (bracketed)
+            {
+                I_width_prev = I_width;
+                I_width = abs(I_hi - I_lo);
+                // Test interval shrinkage
+                if (I_width_prev < Inf && I_width > shrink * I_width_prev)
+                {
+                    I_shrink_fail_count += 1;
+                }
+                else
+                {
+                    I_shrink_fail_count = 0;
+                }
+                // If interval fails to shrink enough twice, select new_step using bisection
+                if (I_shrink_fail_count >= 2)
+                {
+                    new_step = (I_lo + I_hi) / 2.0;
+                    I_shrink_fail_count = 0;
+                }
+            }
+
+            // Set the new_step
+            step = new_step;
         }
 
-        // When we reach here, it means that the maximum number of iterations
-        // have been attained
-        // If we have used up all line search iterations, then the
-        // strong Wolfe condition is not met
-        // We choose not to raise an exception (unless no step satisfying
-        // sufficient decrease is found), but to return the best step size so far
-        //
+        // If we have used up all line search iterations, then the strong Wolfe condition
+        // is not met. We choose not to raise an exception, but to return the best
+        // step size so far
+
         // First test whether the last step is better than I_lo
         // If yes, return the last step
-        const double ft = fx - fx_init - step * test_decr;
-        if (ft <= fI_lo)
+        const double psit = fx - fx_init - step * test_decr;
+        if (psit <= psiI_lo)
             return step;
 
         // If not, then the best step size so far is I_lo, but it needs to be positive
