@@ -53,7 +53,7 @@ except ImportError:
     print("PyTorch not found, will use custom build extension")
     TORCH_BUILD = False
 
-TORCH_BUILD = False
+# TORCH_BUILD = False
 
 if TORCH_BUILD:
     # Use PyTorch's CUDAExtension (simpler configuration)
