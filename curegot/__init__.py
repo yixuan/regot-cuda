@@ -1,3 +1,7 @@
+from ._cuda_loader import preload_cuda_runtime
+
+preload_cuda_runtime()
+
 # When the package is built using Pytorch, we typically
 # need to import torch first to properly load some libraries
 # such as libc10.so
