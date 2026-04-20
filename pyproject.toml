@@ -12,7 +12,10 @@ license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">= 3.11"
 dependencies = [
-    "numpy >= 1.23.0"
+    "numpy >= 1.23.0",
+    "cuda-pathfinder >= 1.5.0",
+    "nvidia-cuda-runtime >= 13.0.0",
+    "nvidia-cudss-cu13 >= 0.7.0.0"
 ]
 
 [project.urls]
