@@ -15,8 +15,9 @@ def get_cccl_include():
     # The directory that contains setup.py
     SETUP_DIRECTORY = str(Path(__file__).resolve().parent)
 
-    CCCL_URL = "https://github.com/NVIDIA/cccl/releases/download/v3.3.0/cccl-v3.3.0.tar.gz"
-    CCCL_DIRNAME = "cccl-v3.3.0"
+    CCCL_URL = "https://github.com/NVIDIA/cccl/releases/download/v3.3.2/cccl-v3.3.2.tar.gz"
+    CCCL_FILE = "cccl-v3.3.2.tar.gz"
+    CCCL_DIRNAME = "cccl-v3.3.2"
 
     # Test whether the environment variable CCCL_INCLUDE_DIR is set
     # If yes, directly return this directory
@@ -32,7 +33,7 @@ def get_cccl_include():
         return cccl_include_dir
 
     # Filename for the downloaded CCCL source package
-    download_target_file = os.path.join(SETUP_DIRECTORY, "cccl-v3.2.1.tar.gz")
+    download_target_file = os.path.join(SETUP_DIRECTORY, CCCL_FILE)
     response = requests.get(CCCL_URL, stream=True)
     with open(download_target_file, "wb") as file:
         for chunk in response.iter_content(chunk_size=1024):
@@ -90,7 +91,7 @@ if TORCH_BUILD:
         ext_modules=ext_modules,
         cmdclass={"build_ext": BuildExtension},
         zip_safe=False,
-        python_requires=">=3.10"
+        python_requires=">=3.11"
     )
 
     # Exit with success
@@ -235,5 +236,5 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExt},
     zip_safe=False,
-    python_requires=">=3.10"
+    python_requires=">=3.11"
 )
