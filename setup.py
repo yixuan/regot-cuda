@@ -60,13 +60,36 @@ def get_cccl_include():
 # Since setup() only supports one cmdclass["build_ext"] argument, we write a unified
 # build_ext class that has different behaviors for different modules
 
+# Default NVCC -gencode option
+DEFAULT_GENCODE_CC = [75, 80, 86, 89, 90, 100, 103, 120]
+DEFAULT_GENCODE_FLAGS = " ".join([f"-gencode=arch=compute_{cc},code=sm_{cc}" for cc in DEFAULT_GENCODE_CC])
+
+# Return -gencode flags as a list of strings
+def get_gencode_flags():
+    gencode_flags = os.environ.get("GENCODE_FLAGS", None)
+    if gencode_flags is None:
+        gencode_flags = DEFAULT_GENCODE_FLAGS
+    
+    return gencode_flags.strip().split(" ")
+
 # Try to import PyTorch's CUDA extension utilities
 TORCH_BUILD = False
 try:
     from torch.utils.cpp_extension import CUDA_HOME, CUDAExtension as TorchCUDAExtension, BuildExtension as TorchBuildExtension
     TORCH_BUILD = True
-    if CUDA_HOME is not None:
+
+    # Use PyTorch to detect CUDA_HOME if it is not set
+    if "CUDA_HOME" not in os.environ and CUDA_HOME is not None:
         os.environ["CUDA_HOME"] = CUDA_HOME
+
+    # Get CUDA architectures that PyTorch was compiled for
+    from torch.cuda import get_arch_list
+    torch_cc = [str.removeprefix("sm_") for str in get_arch_list()]
+    torch_cc = [int(str) for str in torch_cc if str.isdigit()]
+    gencode_cc = list(set(DEFAULT_GENCODE_CC + torch_cc))
+    gencode_cc = sorted(gencode_cc)
+    DEFAULT_GENCODE_FLAGS = " ".join([f"-gencode=arch=compute_{cc},code=sm_{cc}" for cc in gencode_cc])
+
     print("PyTorch detected, will use PyTorch's BuildExtension and CUDAExtension to build PyTorch interface")
 except ImportError:
     print("PyTorch not found, will only build NumPy interface")
@@ -179,6 +202,7 @@ class CUDABuildExtension(build_ext):
 
         # Build nvcc command
         nvcc_cmd = ["nvcc", "-c", "-O3", "--use_fast_math", "-Xcompiler", "-fPIC"]
+        nvcc_cmd += get_gencode_flags()
 
         # Add virtual environment include directory
         venv_inc_dir = os.path.join(sys.exec_prefix, "include")
@@ -230,7 +254,7 @@ else:
             ],
             extra_compile_args={
                 "cxx": ["-O3"],
-                "nvcc": ["-O3", "--use_fast_math"]
+                "nvcc": ["-O3", "--use_fast_math"] + get_gencode_flags()
             }
         )
     )
