@@ -9,7 +9,7 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include "sinkhorn.h"
+#include "solvers.h"
 
 namespace py = pybind11;
 

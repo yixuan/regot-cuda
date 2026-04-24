@@ -3,9 +3,6 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
-// Declares sparse_cholesky_solve_host()
-#include "linsolve.h"
-
 namespace py = pybind11;
 
 // Defined in sinkhorn_splr_kernel.cu
@@ -22,6 +19,17 @@ void T_computation_sparsify_host(
     double* objfn, double* grad, double* gnorm,
     double* Tvalues, int* Tflatind,
     double* csr_val, int* csr_rowptr, int* csr_colind
+);
+
+// Defined in linsolve.cu
+void sparse_cholesky_solve_host(
+    const double* values,
+    const int* colind,
+    const int* rowptr,
+    const double* rhs,
+    double* x,
+    int n,
+    int nnz
 );
 
 // Python interface for T_computation_sparsify_host function
