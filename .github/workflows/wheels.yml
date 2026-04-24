@@ -10,7 +10,7 @@ on:
 
 jobs:
   build_wheels:
-    name: Build wheels on Linux
+    name: Build wheels and source distribution on Linux
     runs-on: ubuntu-latest
 
     steps:
@@ -49,26 +49,9 @@ jobs:
             --exclude 'libcublas.so*'
             --exclude 'libcublasLt.so*'
             --exclude 'libcudss.so*'
-
         with:
           package-dir: .
           output-dir: wheelhouse
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: curegot-wheels-linux
-          path: wheelhouse/*.whl
-
-  build_sdist:
-    name: Build source distribution
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
 
       - name: Build sdist
         run: |
@@ -77,8 +60,10 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: curegot-sdist
-          path: dist/*.tar.gz
+          name: curegot-dist
+          path: |
+            wheelhouse/*.whl
+            dist/*.tar.gz
 
   upload_pypi:
     name: Upload to PyPI
