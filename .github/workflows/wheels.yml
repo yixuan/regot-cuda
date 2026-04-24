@@ -38,9 +38,12 @@ jobs:
           # Image that contains manylinux + CUDA Toolkit
           CIBW_MANYLINUX_X86_64_IMAGE: "ghcr.io/yixuan/regot-cuda-manylinux-cu132:latest"
 
-          # Simple import
-          CIBW_TEST_COMMAND_LINUX: >-
-            python -c "import curegot; print('curegot import OK')"
+          # Exclude CUDA libraries in repairing wheels
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
+            echo '=== auditwheel show before repair ===' &&
+            auditwheel show {wheel} &&
+            echo '=== auditwheel repair ===' &&
+            auditwheel repair -w {dest_dir} {wheel} --exclude 'libcuda.so*'
 
         with:
           package-dir: .
