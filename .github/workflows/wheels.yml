@@ -43,7 +43,12 @@ jobs:
             echo '=== auditwheel show before repair ===' &&
             auditwheel show {wheel} &&
             echo '=== auditwheel repair ===' &&
-            auditwheel repair -w {dest_dir} {wheel} --exclude 'libcuda.so*'
+            auditwheel repair -w {dest_dir} {wheel}
+            --exclude 'libcuda.so*'
+            --exclude 'libcudart.so*'
+            --exclude 'libcublas.so*'
+            --exclude 'libcublasLt.so*'
+            --exclude 'libcudss.so*'
 
         with:
           package-dir: .
