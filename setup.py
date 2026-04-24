@@ -119,11 +119,6 @@ def find_cuda():
 
     return None
 
-cuda_path = find_cuda()
-if not cuda_path:
-    print("Warning: CUDA installation not found. Please install CUDA toolkit and set CUDA_HOME.")
-    sys.exit(1)
-
 # Check for NVCC
 def check_cuda_compiler():
     """Check if nvcc is available"""
@@ -135,9 +130,7 @@ def check_cuda_compiler():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-if not check_cuda_compiler():
-    print("Warning: nvcc compiler not found. Please ensure CUDA toolkit is installed and in PATH.")
-    sys.exit(1)
+cuda_path = find_cuda()
 
 
 
@@ -148,13 +141,15 @@ ext_modules = [
         sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
         include_dirs=[
             get_cccl_include(),
-            os.path.join(cuda_path, "include")
+            os.path.join(cuda_path, "include") if cuda_path is not None else None
         ],
         library_dirs=[
-            os.path.join(cuda_path, "lib64"),
-            os.path.join(cuda_path, "lib")
+            os.path.join(cuda_path, "lib64") if cuda_path is not None else None,
+            os.path.join(cuda_path, "lib") if cuda_path is not None else None,
+            os.path.join(cuda_path, "lib64", "stubs") if cuda_path is not None else None,
+            os.path.join(cuda_path, "lib", "stubs") if cuda_path is not None else None
         ],
-        libraries=["cudart", "cuda", "cudss"],
+        libraries=["cuda", "cudart", "cudss"],
         define_macros=[
             ("VERSION_INFO", __version__),
             ("MODULE_NAME", "_internal_numpy")
@@ -174,6 +169,16 @@ class CUDABuildExtension(build_ext):
         if cuda_sources:
             print(f"Building extension {ext.name} with CUDA support")
 
+            # Check CUDA path
+            if not cuda_path:
+                print("Warning: CUDA installation not found. Please install CUDA toolkit and set CUDA_HOME.")
+                sys.exit(1)
+            
+            # Check NVCC
+            if not check_cuda_compiler():
+                print("Warning: nvcc compiler not found. Please ensure CUDA toolkit is installed and in PATH.")
+                sys.exit(1)
+
             # Store the original objects and add to extra_objects
             if not hasattr(ext, "extra_objects"):
                 ext.extra_objects = []
@@ -189,7 +194,7 @@ class CUDABuildExtension(build_ext):
             # Ensure CUDA libraries are linked
             if not hasattr(ext, "libraries"):
                 ext.libraries = []
-            for lib in ["cudart", "cuda"]:
+            for lib in ["cuda", "cudart"]:
                 if lib not in ext.libraries:
                     ext.libraries.append(lib)
 
@@ -246,7 +251,7 @@ else:
                 os.path.join(sys.exec_prefix, "lib64"),
                 os.path.join(sys.exec_prefix, "lib")
             ],
-            libraries=["cudart", "cuda", "cudss"],
+            libraries=["cuda", "cudart", "cudss"],
             define_macros=[
                 ("VERSION_INFO", __version__),
                 ("MODULE_NAME", "_internal_torch"),
