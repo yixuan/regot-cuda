@@ -23,7 +23,7 @@ Homepage = "https://github.com/yixuan/regot-cuda"
 Issues = "https://github.com/yixuan/regot-cuda/issues"
 
 [build-system]
-requires = ["torch >= 2.10", "pybind11 ~= 3.0.0", "requests ~= 2.32.0", "setuptools >= 80.0"]
+requires = ["pybind11 ~= 3.0.0", "requests ~= 2.32.0", "setuptools >= 80.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.cibuildwheel]
