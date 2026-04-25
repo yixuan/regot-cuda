@@ -266,7 +266,7 @@ if TORCH_BUILD:
                     ("TORCH_BUILD", None)
                 ],
                 extra_compile_args={
-                    "cxx": ["-O3"],
+                    "cxx": ["-O3", "-std=gnu++17"],
                     "nvcc": ["-O3", "--use_fast_math"] + get_gencode_flags()
                 }
             )
