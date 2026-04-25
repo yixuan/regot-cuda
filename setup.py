@@ -229,7 +229,7 @@ ext_modules = [
             ("VERSION_INFO", __version__),
             ("MODULE_NAME", "_internal_numpy")
         ],
-        extra_compile_args=["-O3", "-std=gnu++17"],
+        extra_compile_args=["-O3"],
         language="c++"
     )
 ]
@@ -266,7 +266,7 @@ if TORCH_BUILD:
                     ("TORCH_BUILD", None)
                 ],
                 extra_compile_args={
-                    "cxx": ["-O3", "-std=gnu++17"],
+                    "cxx": ["-O3"],
                     "nvcc": ["-O3", "--use_fast_math"] + get_gencode_flags()
                 }
             )
