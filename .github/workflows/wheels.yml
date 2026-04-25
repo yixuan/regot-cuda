@@ -49,6 +49,8 @@ jobs:
             --exclude 'libcublas.so*'
             --exclude 'libcublasLt.so*'
             --exclude 'libcudss.so*'
+            --exclude 'libc10*.so*'
+            --exclude 'libtorch*.so*'
         with:
           package-dir: .
           output-dir: wheelhouse
