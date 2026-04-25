@@ -39,9 +39,7 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: "ghcr.io/yixuan/regot-cuda-manylinux-cu132:latest"
 
           # Exclude CUDA libraries in repairing wheels
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
-            echo '=== auditwheel show before repair ===' &&
-            auditwheel show {wheel}
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
         with:
           package-dir: .
           output-dir: wheelhouse
