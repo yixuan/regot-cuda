@@ -41,14 +41,7 @@ jobs:
           # Exclude CUDA libraries in repairing wheels
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
             echo '=== auditwheel show before repair ===' &&
-            auditwheel show {wheel} &&
-            echo '=== auditwheel repair ===' &&
-            auditwheel repair -w {dest_dir} {wheel}
-            --exclude 'libcuda.so*'
-            --exclude 'libcudart.so*'
-            --exclude 'libcublas.so*'
-            --exclude 'libcublasLt.so*'
-            --exclude 'libcudss.so*'
+            auditwheel show {wheel}
         with:
           package-dir: .
           output-dir: wheelhouse
