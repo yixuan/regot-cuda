@@ -130,35 +130,9 @@ def check_cuda_compiler():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-cuda_path = find_cuda()
 
 
-
-# NumPy interface: use Pybind11Extension with custom BuildExt
-ext_modules = [
-    Pybind11Extension(
-        name="curegot._internal_numpy",
-        sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
-        include_dirs=[
-            get_cccl_include(),
-            os.path.join(cuda_path, "include") if cuda_path is not None else None
-        ],
-        library_dirs=[
-            os.path.join(cuda_path, "lib64") if cuda_path is not None else None,
-            os.path.join(cuda_path, "lib") if cuda_path is not None else None,
-            os.path.join(cuda_path, "lib64", "stubs") if cuda_path is not None else None,
-            os.path.join(cuda_path, "lib", "stubs") if cuda_path is not None else None
-        ],
-        libraries=["cuda", "cudart", "cudss"],
-        define_macros=[
-            ("VERSION_INFO", __version__),
-            ("MODULE_NAME", "_internal_numpy")
-        ],
-        extra_compile_args=["-O3"],
-        language="c++"
-    )
-]
-
+# NumPy interface: use Pybind11Extension with custom build_ext class
 # Custom build_ext class that supports CUDA
 class CUDABuildExtension(build_ext):
     def build_extension(self, ext):
@@ -170,7 +144,7 @@ class CUDABuildExtension(build_ext):
             print(f"Building extension {ext.name} with CUDA support")
 
             # Check CUDA path
-            if not cuda_path:
+            if not find_cuda():
                 print("Warning: CUDA installation not found. Please install CUDA toolkit and set CUDA_HOME.")
                 sys.exit(1)
             
@@ -234,50 +208,81 @@ class CUDABuildExtension(build_ext):
 
         return output_file
 
-if not TORCH_BUILD:
-    # Simple setup: only build NumPy interface
-    cmdclass = {"build_ext": CUDABuildExtension}
-else:
-    # Build both NumPy and PyTorch interface
-    ext_modules.append(
-        TorchCUDAExtension(
-            name="curegot._internal_torch",
-            sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
-            include_dirs=[
-                get_cccl_include(),
-                os.path.join(cuda_path, "include") if cuda_path is not None else None,
-                os.path.join(sys.exec_prefix, "include")
-            ],
-            library_dirs=[
-                os.path.join(cuda_path, "lib64") if cuda_path is not None else None,
-                os.path.join(cuda_path, "lib") if cuda_path is not None else None,
-                os.path.join(cuda_path, "lib64", "stubs") if cuda_path is not None else None,
-                os.path.join(cuda_path, "lib", "stubs") if cuda_path is not None else None,
-                os.path.join(sys.exec_prefix, "lib64"),
-                os.path.join(sys.exec_prefix, "lib")
-            ],
-            libraries=["cuda", "cudart", "cudss"],
-            define_macros=[
-                ("VERSION_INFO", __version__),
-                ("MODULE_NAME", "_internal_torch"),
-                ("TORCH_BUILD", None)
-            ],
-            extra_compile_args={
-                "cxx": ["-O3"],
-                "nvcc": ["-O3", "--use_fast_math"] + get_gencode_flags()
-            }
-        )
+# Configuration for NumPy interface
+cuda_path = find_cuda()
+ext_modules = [
+    Pybind11Extension(
+        name="curegot._internal_numpy",
+        sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
+        include_dirs=[
+            get_cccl_include(),
+            os.path.join(cuda_path, "include") if cuda_path is not None else None
+        ],
+        library_dirs=[
+            os.path.join(cuda_path, "lib64") if cuda_path is not None else None,
+            os.path.join(cuda_path, "lib") if cuda_path is not None else None,
+            os.path.join(cuda_path, "lib64", "stubs") if cuda_path is not None else None,
+            os.path.join(cuda_path, "lib", "stubs") if cuda_path is not None else None
+        ],
+        libraries=["cuda", "cudart", "cudss"],
+        define_macros=[
+            ("VERSION_INFO", __version__),
+            ("MODULE_NAME", "_internal_numpy")
+        ],
+        extra_compile_args=["-O3"],
+        language="c++"
     )
+]
+cmdclass = {"build_ext": CUDABuildExtension}
 
-    # Define a unified build_ext class to handle both Pybind11Extension and TorchCUDAExtension
-    class UnifiedBuildExtension(CUDABuildExtension, TorchBuildExtension):
-        def build_extension(self, ext):
-            if ext.name.endswith("_torch"):
-                TorchBuildExtension.build_extension(self, ext)
-            else:
-                CUDABuildExtension.build_extension(self, ext)
+# Modify ext_modules and cmdclass if we also build PyTorch interface
+if TORCH_BUILD:
+    # We may also need to build source distribution on machines that do not have
+    # CUDA runtime. In this case, TorchCUDAExtension() may throw exceptions, and
+    # we simply skip it
+    try:
+        # Build both NumPy and PyTorch interface
+        ext_modules.append(
+            TorchCUDAExtension(
+                name="curegot._internal_torch",
+                sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
+                include_dirs=[
+                    get_cccl_include(),
+                    os.path.join(cuda_path, "include") if cuda_path is not None else None,
+                    os.path.join(sys.exec_prefix, "include")
+                ],
+                library_dirs=[
+                    os.path.join(cuda_path, "lib64") if cuda_path is not None else None,
+                    os.path.join(cuda_path, "lib") if cuda_path is not None else None,
+                    os.path.join(cuda_path, "lib64", "stubs") if cuda_path is not None else None,
+                    os.path.join(cuda_path, "lib", "stubs") if cuda_path is not None else None,
+                    os.path.join(sys.exec_prefix, "lib64"),
+                    os.path.join(sys.exec_prefix, "lib")
+                ],
+                libraries=["cuda", "cudart", "cudss"],
+                define_macros=[
+                    ("VERSION_INFO", __version__),
+                    ("MODULE_NAME", "_internal_torch"),
+                    ("TORCH_BUILD", None)
+                ],
+                extra_compile_args={
+                    "cxx": ["-O3"],
+                    "nvcc": ["-O3", "--use_fast_math"] + get_gencode_flags()
+                }
+            )
+        )
 
-    cmdclass = {"build_ext": UnifiedBuildExtension}
+        # Define a unified build_ext class to handle both Pybind11Extension and TorchCUDAExtension
+        class UnifiedBuildExtension(CUDABuildExtension, TorchBuildExtension):
+            def build_extension(self, ext):
+                if ext.name.endswith("_torch"):
+                    TorchBuildExtension.build_extension(self, ext)
+                else:
+                    CUDABuildExtension.build_extension(self, ext)
+
+        cmdclass = {"build_ext": UnifiedBuildExtension}
+    except:
+        pass
 
 setup(
     name="curegot",
