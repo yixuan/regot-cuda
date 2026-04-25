@@ -229,7 +229,7 @@ ext_modules = [
             ("VERSION_INFO", __version__),
             ("MODULE_NAME", "_internal_numpy")
         ],
-        extra_compile_args=["-O3"],
+        extra_compile_args=["-O3", "-std=gnu++17"],
         language="c++"
     )
 ]
