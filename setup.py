@@ -245,9 +245,14 @@ else:
             sources=sorted(glob("src/*.cpp") + glob("src/*.cu")),
             include_dirs=[
                 get_cccl_include(),
+                os.path.join(cuda_path, "include") if cuda_path is not None else None,
                 os.path.join(sys.exec_prefix, "include")
             ],
             library_dirs=[
+                os.path.join(cuda_path, "lib64") if cuda_path is not None else None,
+                os.path.join(cuda_path, "lib") if cuda_path is not None else None,
+                os.path.join(cuda_path, "lib64", "stubs") if cuda_path is not None else None,
+                os.path.join(cuda_path, "lib", "stubs") if cuda_path is not None else None,
                 os.path.join(sys.exec_prefix, "lib64"),
                 os.path.join(sys.exec_prefix, "lib")
             ],
