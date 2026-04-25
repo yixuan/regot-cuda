@@ -8,7 +8,8 @@ authors = [
 maintainers = [
     {name = "Yixuan Qiu", email = "yixuanq@gmail.com"},
 ]
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE.md"]
 readme = "README.md"
 requires-python = ">= 3.11"
 dependencies = [
