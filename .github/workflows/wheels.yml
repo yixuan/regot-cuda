@@ -62,10 +62,13 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: curegot-dist
-          path: |
-            wheelhouse/*.whl
-            dist/*.tar.gz
+          name: curegot-wheels
+          path: wheelhouse/*.whl
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: curegot-sdist
+          path: dist/*.tar.gz
 
   upload_pypi:
     name: Upload to PyPI
@@ -88,5 +91,5 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # with:
-        #   packages-dir: dist
+        with:
+          packages-dir: dist
