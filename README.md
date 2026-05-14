@@ -20,7 +20,17 @@ RegOT-CUDA is a work in progress. Currently we have implemented the block coordi
 
 ## Installation
 
-### Environment Setup
+### Using `pip`
+
+You can simply install **cuRegOT** using the `pip` command, and dependent CUDA runtime libraries will be automatically installed:
+
+```bash
+pip install curegot
+```
+
+### Building from source
+
+#### Environment Setup
 
 The CUDA development environment is required to build this package from source.
 You can install the C++ compiler and CUDA libraries using Conda:
@@ -48,7 +58,7 @@ conda activate nvdev
 conda env config vars set CUDA_HOME="<path_to_conda>/envs/nvdev/"
 ```
 
-### Build and Install
+#### Build and Install
 
 ```bash
 cd regot-cuda
@@ -129,6 +139,20 @@ python test_sinkhorn_splr.py
 
 The plot below shows the benchmark result for some popular GPU-based solvers. The horizontal axis represents the elapsed wall time, and the vertical axis is the optimization error on a logarithmic scale. Lower curves indicate better performance, achieving lower errors in less time.
 
-More details on the benchmark will be provided soon.
-
 ![](figs/benchmark.png)
+
+More details on the benchmark can be found in [the paper](https://arxiv.org/pdf/2605.08793).
+
+## Bibliography
+
+Please consider to cite our work if you find our algorithms or
+software useful in your research and applications.
+
+```bibtex
+@inproceedings{qiu2026curegot,
+  title={{{cuRegOT}}: A {{GPU}}-Accelerated Solver for Entropic-Regularized Optimal Transport},
+  author={Qiu, Yixuan},
+  booktitle={Forty-third International Conference on Machine Learning},
+  year={2026}
+}
+```
