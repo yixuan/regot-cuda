@@ -4,6 +4,23 @@
 
 As a complement to this library, the [RegOT-Python](https://github.com/yixuan/regot-python) repository provides efficient CPU-based solvers for regularized optimal transport.
 
+## Problem Formulation
+
+Currently RegOT-CUDA solves the entropic-regularized optimal transport problem:
+
+```math
+\begin{align*}
+\min_{T\in\mathbb{R}^{n\times m}}\quad & \langle T,M\rangle-\eta\cdot h(T),\\
+\text{subject to}\quad & T\mathbf{1}_{m}=a,T^{T}\mathbf{1}_{n}=b,T\ge0,
+\end{align*}
+```
+
+where $a\in\mathbb{R}^n$ and $b\in\mathbb{R}^m$ are two given
+probability vectors with $a_i>0$, $b_j>0$, $\sum_{i=1}^n a_i=\sum_{j=1}^m b_j=1$,
+and $M\in\mathbb{R}^{n\times m}$ is a given cost matrix.
+The function $h(T)=\sum_{i=1}^{n}\sum_{j=1}^{m}T_{ij}(1-\log T_{ij})$ is the entropy term,
+and $\eta>0$ is a regularization parameter.
+
 ## Work in Progress
 
 RegOT-CUDA is a work in progress. Currently we have implemented the block coordinate descent algorithm (BCD, equilavent to the well-known Sinkhorn algorithm) and the sparse-plus-low-rank quasi-Newton method (SPLR) for entropic-regularized optimal transport. More state-of-the-art solvers are under development, and a list of candidate algorithms can be found in the [RegOT-Python](https://github.com/yixuan/regot-python) package.
