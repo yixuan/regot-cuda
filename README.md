@@ -1,3 +1,5 @@
+
+
 # RegOT-CUDA
 
 **RegOT-CUDA (cuRegOT)** is a CUDA-accelerated library for optimal transport computation, providing high-performance implementations of regularized optimal transport algorithms.
@@ -23,7 +25,7 @@ and $\eta>0$ is a regularization parameter.
 
 ## Work in Progress
 
-RegOT-CUDA is a work in progress. Currently we have implemented the block coordinate descent algorithm (BCD, equilavent to the well-known Sinkhorn algorithm) and the sparse-plus-low-rank quasi-Newton method (SPLR) for entropic-regularized optimal transport. More state-of-the-art solvers are under development, and a list of candidate algorithms can be found in the [RegOT-Python](https://github.com/yixuan/regot-python) package.
+RegOT-CUDA is a work in progress. Currently we have implemented the block coordinate descent algorithm (BCD, equivalent to the well-known Sinkhorn algorithm) and the sparse-plus-low-rank quasi-Newton method (SPLR) for entropic-regularized optimal transport. More state-of-the-art solvers are under development, and a list of candidate algorithms can be found in the [RegOT-Python](https://github.com/yixuan/regot-python) package.
 
 ## Requirements
 
