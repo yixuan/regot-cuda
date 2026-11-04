@@ -1,13 +1,13 @@
 """Implicit gradient for a converged SPLR plan.
 
-Solve Q(T) lambda = rhs_Q_scale(G, T), then assemble dL/dM.
+Solve Q(T) lambda = rhs_Q_scale(G, T), then assemble dL/dM, dL/da and dL/db.
 The default native diagonal uses diag(A) of the context sparse matrix,
 not diag(Q(T)). SPLR reuses its factorization and optional rank-2 update;
 none selects plain CG. Performance depends on workload and tolerance.
 """
 
 from ._internal_torch import torch as _native_torch
-from ._backward_core import rhs_Q_scale, assemble_grad
+from ._backward_core import rhs_Q_scale, assemble_grad, assemble_marginal_grad
 
 __all__ = ["solve_backward"]
 
@@ -41,12 +41,16 @@ def solve_backward(
         dict with
             "lambda":         [n + m - 1] reduced dual solution,
             "grad":           [n, m] implicit gradient dL/dM,
+            "grad_a":         [n] marginal gradient,
+            "grad_b":         [m] marginal gradient, last entry zero,
             "iterations":     PCG iterations used,
             "converged":      whether PCG met tol within max_iter,
             "preconditioner": the mode actually used.
 
     Note: the returned "lambda" is the reduced-gauge dual (beta_m = 0);
-    "grad" already accounts for the gauge internally.
+    "grad" already accounts for the gauge internally. The marginal gradients
+    represent derivatives for equal-mass perturbations, sum(da)=sum(db);
+    their gauge choice does not make the last b entry independent of the loss.
     """
     # Validate the plan/upstream shapes and preconditioner mode.
     if T.dim() != 2:
@@ -68,7 +72,8 @@ def solve_backward(
         T, mu, ctx, preconditioner, tol, max_iter
     )
 
-    # Assemble dL/dM from the solved dual perturbation.
+    # Reuse the same restored-scale adjoint for all three input gradients.
     result["grad"] = assemble_grad(T, G, result["lambda"], reg, n, m)
+    result["grad_a"], result["grad_b"] = assemble_marginal_grad(result["lambda"], n, m)
     result["preconditioner"] = preconditioner
     return result

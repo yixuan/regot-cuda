@@ -9,12 +9,12 @@ Public API (also attached to the native ``curegot.torch`` submodule by
     loss = downstream_loss(T)
     loss.backward()                                # M.grad = dL/dM
 
-Gradient scope (deliberately conservative):
+Gradient scope:
 
     M:    differentiable (dL/dM via the validated implicit-differentiation
           path: reduced-Hessian PCG with the native diagonal preconditioner
           by default)
-    a, b: constants -- requires_grad=True raises NotImplementedError
+    a, b: differentiable positive marginals with equal total mass
     reg:  constant scalar -- tensor requires_grad=True raises NotImplementedError
 
 Requirements: M/a/b are CUDA float64 tensors on the same device; one OT
@@ -175,7 +175,7 @@ class SinkhornAutogradFunction(torch.autograd.Function):
         G = grad_output if grad_output.is_contiguous() \
             else grad_output.contiguous()
 
-        # Build the RHS, dispatch native PCG and assemble the cost gradient.
+        # One native adjoint solve supplies the M/a/b gradients.
         res = solve_backward(
             T, G, ctx.backward_context, ctx.reg,
             preconditioner=ctx.backward_preconditioner,
@@ -192,13 +192,13 @@ class SinkhornAutogradFunction(torch.autograd.Function):
                 f"tol={ctx.backward_tol}, "
                 f"preconditioner='{ctx.backward_preconditioner}')"
             )
-        grad_M = res["grad"]
-
         # One gradient per forward input (M, a, b, reg, tol, max_iter,
         # verbose, backward_preconditioner,
         # backward_tol, backward_max_iter) -- order must match exactly.
-        return (grad_M, None, None, None, None, None, None, None, None,
-                None)
+        return (res["grad"] if ctx.needs_input_grad[0] else None,
+                res["grad_a"] if ctx.needs_input_grad[1] else None,
+                res["grad_b"] if ctx.needs_input_grad[2] else None,
+                None, None, None, None, None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +221,11 @@ def sinkhorn_autograd(
     """Differentiable entropic-OT plan via the SPLR solver.
 
     Args:
-        M:   [n, m] CUDA float64 tensor (cost matrix); the only
-             differentiable input. One OT problem per call.
-        a:   [n] CUDA float64 source marginal (constant).
-        b:   [m] CUDA float64 target marginal (constant).
+        M:   [n, m] CUDA float64 cost matrix, differentiable.
+             One OT problem per call.
+        a:   [n] positive CUDA float64 source marginal, differentiable.
+        b:   [m] positive CUDA float64 target marginal, differentiable.
+             a and b must have equal total mass; no automatic normalization.
         reg: entropic regularization (constant scalar, required, > 0).
         tol: forward solver tolerance. Default 1e-6 matches the native
              pybind default of sinkhorn_splr_save_ctx.
@@ -237,12 +238,13 @@ def sinkhorn_autograd(
 
     Returns:
         T: [n, m] CUDA float64 tensor, the optimal transport plan, with
-           grad_fn attached when M.requires_grad.
+           grad_fn attached when grad mode is enabled and any of M/a/b
+           requires grad.
 
     Raises:
         RuntimeError: CUDA/float64 contract violation, AMP/autocast active,
              forward non-convergence, backward PCG non-convergence.
-        NotImplementedError: a, b or tensor reg requires grad.
+        NotImplementedError: tensor reg requires grad.
         ValueError: invalid preconditioner, shape mismatch, or invalid
              scalar parameter.
 
@@ -254,7 +256,12 @@ def sinkhorn_autograd(
         >>> loss.backward()   # M.grad holds dL/dM
 
     Notes:
-        * Only dL/dM is supported; a/b/reg are constants.
+        * M/a/b support first derivatives; reg is constant.
+        * Marginal derivatives are defined on sum(da)=sum(db). We return
+          the reduced-gauge representative with grad_b[-1]=0, which does
+          not mean the last b entry has no effect on feasible changes.
+        * Use separate softmax logits for trainable unit-mass marginals;
+          PyTorch applies the normalization chain rule.
         * CUDA float64 only; AMP/autocast is rejected.
         * Double backward is unsupported (@once_differentiable).
         * Forward and backward non-convergence raise RuntimeError.
@@ -268,11 +275,6 @@ def sinkhorn_autograd(
         )
     _check_inputs(M, a, b)
     _validate_scalars(reg, tol, max_iter, backward_tol, backward_max_iter)
-    if a.requires_grad or b.requires_grad:
-        raise NotImplementedError(
-            "sinkhorn_autograd: gradients w.r.t. a/b are not supported "
-            "(only dL/dM); detach them or use the lower-level API"
-        )
     if backward_preconditioner not in _VALID_PRECONDITIONERS:
         raise ValueError(
             f"sinkhorn_autograd: invalid backward_preconditioner "

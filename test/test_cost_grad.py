@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Test script for differentiable SPLR OT backward.
+"""Single-input cost-gradient validation; requires CUDA float64.
 
-Run from an installed candidate: python -B test/test_backward.py
+Run from an installed candidate: python -B test/test_cost_grad.py
 """
 
 import gc
@@ -11,51 +11,21 @@ import torch
 
 import curegot
 
-
-def problem(n=16, m=19, seed=42):
-    generator = torch.Generator().manual_seed(seed)
-    M = torch.rand(n, m, generator=generator, dtype=torch.float64).cuda()
-    a = torch.rand(n, generator=generator, dtype=torch.float64).cuda() + 0.5
-    b = torch.rand(m, generator=generator, dtype=torch.float64).cuda() + 0.5
-    return M, a / a.sum(), b / b.sum()
-
-
-def random_gradient(plan, seed=9):
-    return torch.randn(
-        plan.shape, generator=torch.Generator().manual_seed(seed), dtype=plan.dtype
-    ).to(plan.device)
+from _gradient_test_utils import (
+    check_autocast_rejected,
+    check_double_backward_rejected,
+    check_reg_gradient_rejected,
+    dense_reference,
+    expect_error,
+    problem,
+    random_gradient,
+)
 
 
 def relative(actual, expected):
     denominator = torch.linalg.norm(expected)
     assert denominator > 0
     return float(torch.linalg.norm(actual - expected) / denominator)
-
-
-def dense_gradient(plan, upstream, reg):
-    n = plan.shape[0]
-    reduced_plan = plan[:, :-1]
-    Q = torch.cat(
-        [
-            torch.cat([torch.diag(plan.sum(1)), reduced_plan], 1),
-            torch.cat([reduced_plan.T, torch.diag(plan.sum(0)[:-1])], 1),
-        ],
-        0,
-    )
-    weighted = upstream * plan
-    rhs = torch.cat([weighted.sum(1), weighted.sum(0)[:-1]])
-    dual = torch.linalg.solve(Q, rhs)
-    beta = torch.cat([dual[n:], dual.new_zeros(1)])
-    return plan * (dual[:n, None] + beta[None, :] - upstream) / reg
-
-
-def expect_error(error_type, message, call):
-    try:
-        call()
-    except error_type as error:
-        assert message in str(error), str(error)
-    else:
-        raise AssertionError(f"expected {error_type.__name__}: {message}")
 
 
 def test_backward_against_dense_reference():
@@ -81,7 +51,7 @@ def test_backward_against_dense_reference():
         loss.backward()
 
         # Compute the independent dense reference.
-        expected = dense_gradient(plan.detach(), G, options["reg"])
+        expected = dense_reference(plan.detach(), G, options["reg"])["gradients"][0]
 
         # Each preconditioner must give the correct cost gradient.
         error = relative(cost.grad, expected)
@@ -89,6 +59,7 @@ def test_backward_against_dense_reference():
         print(
             f"PASS {mode} backward against dense reference: relative error={error:.3e}"
         )
+    print("PASS test_backward_against_dense_reference", flush=True)
 
 
 def test_finite_difference():
@@ -132,6 +103,7 @@ def test_finite_difference():
         error = abs(finite_difference - gradient)
         assert error < 1e-5
         print(f"PASS {mode} finite difference: absolute error={error:.3e}")
+    print("PASS test_finite_difference", flush=True)
 
 
 def test_active_rank2():
@@ -160,9 +132,10 @@ def test_active_rank2():
     plan.backward(G)
 
     # Compare with the independent dense reference.
-    expected = dense_gradient(plan.detach(), G, 0.03)
+    expected = dense_reference(plan.detach(), G, 0.03)["gradients"][0]
     assert relative(cost.grad, expected) < 1e-8
     print("PASS public backward with active rank-2 SPLR")
+    print("PASS test_active_rank2", flush=True)
 
 
 def test_forward_context():
@@ -189,7 +162,7 @@ def test_forward_context():
 
     # Verify backward after forwarding the requested convergence controls.
     plan.backward(G)
-    expected = dense_gradient(plan.detach(), G, 0.3)
+    expected = dense_reference(plan.detach(), G, 0.3)["gradients"][0]
     assert relative(cost.grad, expected) < 1e-8
 
     # Create a controlled legacy forward result for context adoption/fallback.
@@ -221,9 +194,10 @@ def test_forward_context():
         )
 
         # Compare the cost gradient with the independent dense reference.
-        expected = dense_gradient(saved["plan"], G, 0.3)
+        expected = dense_reference(saved["plan"], G, 0.3)["gradients"][0]
         assert result["converged"] and relative(result["grad"], expected) < 1e-8
         print(f"PASS save_ctx {name}: usable context and dense cost gradient")
+    print("PASS test_forward_context", flush=True)
 
 
 def test_nondefault_stream():
@@ -262,9 +236,10 @@ def test_nondefault_stream():
 
     # Compare against the reference after the stream finishes.
     stream.synchronize()
-    expected = dense_gradient(plan.detach(), G, 0.3)
+    expected = dense_reference(plan.detach(), G, 0.3)["gradients"][0]
     assert relative(observed, expected) < 1e-8
     print("PASS public backward / delayed gradient / same-stream consumer")
+    print("PASS test_nondefault_stream", flush=True)
 
 
 def test_lifetime_and_repeated_backward():
@@ -288,7 +263,7 @@ def test_lifetime_and_repeated_backward():
 
         # Run the first backward and compare with the dense reference.
         loss.backward(retain_graph=True)
-        expected = dense_gradient(plan.detach(), G, options["reg"])
+        expected = dense_reference(plan.detach(), G, options["reg"])["gradients"][0]
         assert relative(cost.grad, expected) < 1e-8
         first = cost.grad.clone()
 
@@ -306,7 +281,7 @@ def test_lifetime_and_repeated_backward():
     plan = curegot.torch.sinkhorn_autograd(
         cost, a, b, **options, backward_preconditioner="splr", backward_tol=1e-12
     )
-    expected = dense_gradient(plan.detach(), 2 * plan.detach(), options["reg"])
+    expected = dense_reference(plan.detach(), 2 * plan.detach(), options["reg"])["gradients"][0]
     loss = plan.square().sum()
 
     # Release forward-local references.
@@ -319,6 +294,7 @@ def test_lifetime_and_repeated_backward():
     # Compare against the dense reference.
     assert relative(cost.grad, expected) < 1e-8
     print("PASS context lifetime after releasing forward locals")
+    print("PASS test_lifetime_and_repeated_backward", flush=True)
 
 
 def test_sizes_and_failures():
@@ -382,6 +358,7 @@ def test_sizes_and_failures():
     )
     assert cost.grad is None
     print("PASS smallest shape / invalid shapes / forward and backward failures")
+    print("PASS test_sizes_and_failures", flush=True)
 
 
 def test_tiny_gradient():
@@ -402,16 +379,36 @@ def test_tiny_gradient():
     plan.backward(G * scale)
 
     # Compute the ordinary-scale dense reference.
-    expected = dense_gradient(plan.detach(), G, 0.3)
+    expected = dense_reference(plan.detach(), G, 0.3)["gradients"][0]
 
     # Undo the scale before taking norms so the oracle cannot underflow.
     assert torch.count_nonzero(M.grad) > 0
     assert relative(M.grad / scale, expected) < 1e-8
     print("PASS public tiny-gradient normalization (1e-160)")
+    print("PASS test_tiny_gradient", flush=True)
+
+
+def test_shared_autograd_contracts():
+    # Create representative M-only inputs.
+    M, a, b = problem()
+    M.requires_grad_(True)
+
+    # Check the same public restrictions used by the marginal tests.
+    check_reg_gradient_rejected(M, a, b, 0.3)
+    check_autocast_rejected(M, a, b, 0.3)
+    check_double_backward_rejected(
+        M, a, b, 0.3, (M,),
+        tol=1e-8,
+        backward_tol=1e-12,
+        feasibility_tol=1e-7,
+    )
+    print("PASS test_shared_autograd_contracts", flush=True)
 
 
 def main():
-    assert torch.cuda.is_available()
+    if not __debug__:
+        raise RuntimeError("Tests require assertions; do not use -O or PYTHONOPTIMIZE.")
+    assert torch.cuda.is_available(), "Requires CUDA float64"
 
     test_backward_against_dense_reference()
     test_finite_difference()
@@ -421,8 +418,9 @@ def main():
     test_lifetime_and_repeated_backward()
     test_sizes_and_failures()
     test_tiny_gradient()
+    test_shared_autograd_contracts()
 
-    print("BACKWARD CORE VALIDATION PASS", flush=True)
+    print("COST GRADIENT VALIDATION PASS", flush=True)
 
 
 if __name__ == "__main__":

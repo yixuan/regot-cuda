@@ -148,7 +148,7 @@ print(plan2[:3, :3])
 #### Differentiable PyTorch Sinkhorn
 
 Use `curegot.torch.sinkhorn_splr` for forward-only SPLR solves and
-`curegot.torch.sinkhorn_autograd` when the cost matrix needs gradients.
+`curegot.torch.sinkhorn_autograd` when the cost matrix or marginals need gradients.
 `sinkhorn_autograd` runs the SPLR forward pass while retaining the context
 required by PyTorch autograd; `loss.backward()` later invokes the implicit
 backward solver.
@@ -184,13 +184,41 @@ the exact Q(T) diagonal. Native C++ PCG always applies the matrix-free CUDA Q(T)
 Performance depends on workload and requested accuracy; SPLR is not always
 faster than diagonal preconditioning.
 
-Only M gradients are supported. Marginals a/b must not require gradients;
-reg is a constant scalar. Forward or backward non-convergence raises.
-AMP and double backward are unsupported.
+First derivatives of M, a and b are supported, including when only a or only b
+requires gradients. All three use the same native adjoint solve with the true
+Q(T) operator. reg remains a constant scalar. Forward or backward
+non-convergence raises; AMP and double backward are unsupported.
+
+Marginals must be strictly positive, finite and have equal total mass. The
+solver does not normalize them automatically. Marginal derivatives act on
+feasible perturbations with `sum(da) = sum(db)`. We return the reduced-gauge
+representative `grad_a = lambda_alpha`, `grad_b = [lambda_beta, 0]`; there is
+no extra reg factor. The last zero fixes the gauge: it does **not** mean the
+last b entry has no effect. Adding `(c, -c)` to the two marginal gradients
+leaves every feasible directional derivative unchanged.
+
+For trainable probability marginals, use separate softmax logits:
+
+```python
+u = torch.zeros(M.shape[0], device=M.device, dtype=M.dtype, requires_grad=True)
+v = torch.zeros(M.shape[1], device=M.device, dtype=M.dtype, requires_grad=True)
+a, b = u.softmax(0), v.softmax(0)
+T = curegot.torch.sinkhorn_autograd(M, a, b, reg)
+T.square().sum().backward()  # M.grad, u.grad and v.grad
+```
+
+PyTorch applies the softmax chain rule and removes the arbitrary additive
+constants in marginal gradients. A shared positive mass can multiply both
+softmax outputs if total mass is also trainable. For finite differences,
+perturb marginals along equal-mass directions (or perturb the logits), rather
+than changing a single marginal coordinate while holding the other fixed.
 
 See [the example](examples/differentiable_splr_ot.py). After installation, run
-`python -B test/test_backward.py` for the dense oracle, all three autograd
-preconditioners, context lifetime, fallback and active rank-2 checks.
+`python -B test/test_cost_grad.py` for the dense oracle, all three autograd
+preconditioners, context lifetime, fallback and active rank-2 checks. Run
+`python -B test/test_marginal_grad.py` for
+marginal gradients, feasible marginal/joint-mass finite differences and shared
+autograd input-contract checks.
 
 ## Tests
 
